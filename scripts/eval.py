@@ -5,8 +5,8 @@ Takes any csv with 'context' + 'first letter' columns; 'answer' is optional -- i
 accuracy is scored (overall + broken down by route), if absent predictions are just written out.
 
 Usage:
-    python3 eval.py --data ../data/devv_test.csv --model ../weights/ngram_3.bin
-    python3 eval.py --data ../data/test_set_no_answer.csv --model ../weights/ngram_3.bin --out preds.csv
+    python3 eval.py --data ../data/devv_test.csv --model ../weights/ngram_3.counts.pkl
+    python3 eval.py --data ../data/test_set_no_answer.csv --model ../weights/ngram_3.counts.pkl --out preds.csv
 """
 import argparse
 import csv
@@ -30,7 +30,7 @@ def predict_row(context, letter, model):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
-    ap.add_argument("--model", default="../weights/ngram_3.bin")
+    ap.add_argument("--model", default="../weights/ngram_3.counts.pkl")
     ap.add_argument("--out", default=None, help="write predictions to this csv")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()

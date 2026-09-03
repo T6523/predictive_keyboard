@@ -1,13 +1,20 @@
-"""Score an n-gram model (from train_ngram.py) on a dev-style csv (context, first letter, answer).
+"""Score an n-gram model on a dev-style csv (context, first letter, answer).
 
-Stupid backoff: try the highest order context first: among next-token candidates seen after
-that context, keep only ones starting with the required letter, take the highest count. If no
-candidate survives (context unseen, or nothing there starts with that letter) fall back one
-order down, down to unigrams.
+Stupid backoff: try the highest order context first, among next-token candidates *actually
+observed* after that context, keep only ones starting with the required letter, take the
+highest raw count. Falls back one order down on a miss, down to unigrams.
+
+Model = weights/ngram_N.counts.pkl, from train_ngram.py -- int-encoded raw counts, not the
+KenLM-trained weights/ngram_N.bin. Ranking needs exact counts (which word was seen most often
+after this context), not a smoothed probability: KenLM's Kneser-Ney backoff reorders candidates
+by adding a per-word backoff-weighted lower-order term, which can rank a common word above the
+true highest-count continuation -- fine for perplexity, wrong for this exact-match metric. See
+weights/ngram_N.bin (trained by lmplz, scripts/build_kenlm.sh) for the compact/mmap'd artifact;
+it isn't used for prediction here.
 
 Usage:
-    python3 eval_ngram.py --model ngram_3.bin --data devv_eval.csv
-    python3 eval_ngram.py --model ngram_3.bin --data devv_eval.csv --limit 2000
+    python3 eval_ngram.py --model ../weights/ngram_3.counts.pkl --data ../clean/devv_eval.csv
+    python3 eval_ngram.py --model ../weights/ngram_3.counts.pkl --data ../clean/devv_eval.csv --limit 2000
 """
 import argparse
 import csv
@@ -21,25 +28,30 @@ def load_model(path):
 
 
 def predict(model, context_tokens, letter):
-    n, counts, bos = model["n"], model["counts"], model["bos"]
-    padded = [bos] * (n - 1) + context_tokens
+    n, counts, vocab, id_to_tok, bos_id = (
+        model["n"], model["counts"], model["vocab"], model["id_to_tok"], model["bos_id"]
+    )
+    # -1 for unseen tokens: never matches any stored context, so it backs off/misses same as
+    # a raw unseen string would.
+    padded = [bos_id] * (n - 1) + [vocab.get(t, -1) for t in context_tokens]
+    letter = letter.lower()  # vocab is lowercased at train time
     for k in range(n - 1, -1, -1):  # k = context length used, from n-1 down to 0
         ctx = tuple(padded[len(padded) - k:]) if k else ()
         cands = counts[k].get(ctx)
         if not cands:
             continue
-        best_tok, best_c = None, -1
-        for tok, c in cands.items():
-            if tok.startswith(letter) and c > best_c:
-                best_tok, best_c = tok, c
-        if best_tok is not None:
-            return best_tok, k  # k = order that produced the hit
+        best_word, best_c = None, -1
+        for word, c in cands.items():
+            if id_to_tok[word].startswith(letter) and c > best_c:
+                best_word, best_c = word, c
+        if best_word is not None:
+            return id_to_tok[best_word], k  # k = order that produced the hit
     return None, -1
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="../weights/ngram_3.bin")
+    ap.add_argument("--model", default="../weights/ngram_3.counts.pkl")
     ap.add_argument("--data", default="../data/devv_eval.csv")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()

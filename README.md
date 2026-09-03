@@ -15,15 +15,18 @@ data/train.src.tok
       ▼
       │  clean_alnum.py      (drop non-alnum tokens; keep all csv rows)
       ▼
-clean/train.src.tok  ──►  train_ngram.py  ──►  weights/ngram_N.bin
+clean/train.src.tok  ──►  lmplz  ──►  weights/ngram_N.arpa  ──►  build_binary  ──►  weights/ngram_N.bin
 ```
 
 1. `scripts/split_dev.py` — split `dev_set.csv` 80/20 into `devv_eval.csv` (tuning) / `devv_test.csv` (holdout).
 2. `scripts/clean_pipeline.py` — lowercase, fix `- lrb -` → `-lrb-` style bracket tokens.
 3. `scripts/clean_alnum.py` — strip non-alnum tokens from the training corpus and from csv `context` columns.
-4. `scripts/train_ngram.py --n {3,4,5} --out weights/ngram_N.bin` — count-based n-gram model (orders 1..n, no smoothing baked in).
-5. `scripts/eval_ngram.py --model weights/ngram_N.bin --data clean/devv_eval.csv` — score the n-gram alone (stupid backoff: highest order first, keep candidates starting with the required letter, fall back on miss).
-6. `scripts/eval.py --data clean/devv_test.csv --model weights/ngram_N.bin [--out preds.csv]` — full pipeline: symbol/[UNK] rows answered deterministically, rest through the n-gram; reports overall + per-route accuracy.
+4. `scripts/bin/lmplz -o N < clean/train.src.tok > weights/ngram_N.arpa` — trains the count-based n-gram (orders 1..N, modified Kneser-Ney smoothing). [KenLM](https://kheafield.com/code/kenlm/)'s C++ trainer — swapped in for the original pure-Python `train_ngram.py` to fix the RAM blowup on higher orders (Python's per-object overhead on millions of count-table entries vs. KenLM's packed structures). `lmplz` prints a live stage-by-stage progress bar (counting → sorting → discounting → interpolating) to stderr.
+5. `scripts/bin/build_binary weights/ngram_N.arpa weights/ngram_N.bin` — compiles the text `.arpa` into KenLM's mmap'd binary format (loads near-instantly, doesn't pull the whole model into RAM).
+6. `scripts/eval_ngram.py --model weights/ngram_N.bin --data clean/devv_eval.csv` — score the n-gram alone (stupid backoff: highest order first, keep candidates starting with the required letter, fall back on miss).
+7. `scripts/eval.py --data clean/devv_test.csv --model weights/ngram_N.bin [--out preds.csv]` — full pipeline: symbol/[UNK] rows answered deterministically, rest through the n-gram; reports overall + per-route accuracy.
+
+`scripts/train_ngram.py` (pure Python, pickle-based) is kept for reference/small experiments but is no longer the primary path — `weights/*.bin` files are now KenLM binaries, not pickles.
 
 ## Layout
 
@@ -41,7 +44,13 @@ scripts/  pipeline scripts (see above)
 python3 scripts/split_dev.py
 python3 scripts/clean_pipeline.py
 python3 scripts/clean_alnum.py
-python3 scripts/train_ngram.py --n 3 --train clean/train.src.tok --out weights/ngram_3.bin
+
+# build lmplz + build_binary once (needs cmake, libboost-all-dev, libeigen3-dev,
+# zlib1g-dev, libbz2-dev, liblzma-dev — see scripts/build_kenlm.sh)
+scripts/bin/lmplz -o 3 < clean/train.src.tok > weights/ngram_3.arpa
+scripts/bin/build_binary weights/ngram_3.arpa weights/ngram_3.bin
+rm weights/ngram_3.arpa  # intermediate text file, regenerable, ~2x the .bin size
+
 python3 scripts/eval_ngram.py --model weights/ngram_3.bin --data clean/devv_eval.csv
 python3 scripts/eval.py --data clean/devv_test.csv --model weights/ngram_3.bin
 ```
