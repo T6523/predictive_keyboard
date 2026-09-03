@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+train.zip
+data/
+clean/
+weights/
+.ipynb_checkpoints/
+*.pdf
