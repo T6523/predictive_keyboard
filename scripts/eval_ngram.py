@@ -35,15 +35,19 @@ def predict(model, context_tokens, letter):
     # a raw unseen string would.
     padded = [bos_id] * (n - 1) + [vocab.get(t, -1) for t in context_tokens]
     letter = letter.lower()  # vocab is lowercased at train time
+    unigrams = counts[0].get(())  # word_id -> global count, tie-break for equal-count candidates
     for k in range(n - 1, -1, -1):  # k = context length used, from n-1 down to 0
         ctx = tuple(padded[len(padded) - k:]) if k else ()
         cands = counts[k].get(ctx)
         if not cands:
             continue
-        best_word, best_c = None, -1
+        best_word, best_c, best_u = None, -1, -1
         for word, c in cands.items():
-            if id_to_tok[word].startswith(letter) and c > best_c:
-                best_word, best_c = word, c
+            if not id_to_tok[word].startswith(letter):
+                continue
+            u = unigrams.get(word, 0) if unigrams else 0
+            if c > best_c or (c == best_c and u > best_u):
+                best_word, best_c, best_u = word, c, u
         if best_word is not None:
             return id_to_tok[best_word], k  # k = order that produced the hit
     return None, -1
