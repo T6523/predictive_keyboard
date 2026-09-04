@@ -28,14 +28,26 @@ clean/train.src.tok  ──►  lmplz  ──►  weights/ngram_N.arpa  ──�
 
 `scripts/train_ngram.py` (pure Python, pickle-based) is kept for reference/small experiments but is no longer the primary path — `weights/*.bin` files are now KenLM binaries, not pickles.
 
+## Transformer (transformer/)
+
+A word-level GPT2/Qwen2 model (`transformer/models.py`), trained on Kaggle (`transformer/run_kaggle.sh` → `transformer/kernel/build_notebook.py`). Vocab (`transformer/vocab.py`) is built from whatever `train.src.tok` is attached as the Kaggle input dataset — in practice the **raw** `data/train.src.tok` (99021 unique tokens, symbols kept), not `clean/train.src.tok`. `MIN_COUNT=1` (keep everything) + `<s>`/`</s>` added at index 0/1 → checkpoint `vocab_size` is **99023**.
+
+## gigaword.tar.gz preprocessing
+
+`data/gigaword.tar.gz` is the raw NYT Gigaword archive (149 monthly files, 1994-07..2006-12, 6.3GB uncompressed) the training corpus's domain comes from — not itself training data, useful for vocab-coverage and pretraining experiments.
+
+- `eda/gigaword_eda.ipynb` — streams the tar.gz directly (never extracted to disk), one pass: paragraph length distribution, token category/case breakdown, Zipf plot, vocab overlap with `train.src.tok`/dev/test, and a cumulative-coverage table (vocab size needed for 95/97.5/99/99.99% token coverage). Caches the full-corpus pass to `data/gigaword_stats_cache.pkl` (~10min first run, instant reruns).
+- `scripts/tokenize_gigaword.py` — tokenizes gigaword onto `train.src.tok`'s exact vocab: lowercases, isolates punctuation the same way `train.src.tok` does (`o.j.` → `o . j .`, `don't` → `don ' t`, `-LRB-` → `- lrb -`), masks any token outside the 99021-word vocab with `[UNK]`. Nothing stripped (unlike `clean_alnum.py` — symbols/`[UNK]` all survive as tokens). Streams from the tar.gz, writes to `data/gigaword.tok` (not `clean/`, since it's a derived-from-raw artifact, not a cleaned version of an existing `clean/` file). `--limit N` for a quick test run.
+
 ## Layout
 
 ```
-data/     raw csv/tok files (untouched originals)
-clean/    cleaned outputs of clean_pipeline.py + clean_alnum.py
-weights/  trained ngram_N.bin model files
-eda/      exploration notebooks
-scripts/  pipeline scripts (see above)
+data/        raw csv/tok files (untouched originals) + gigaword.tar.gz / gigaword.tok
+clean/       cleaned outputs of clean_pipeline.py + clean_alnum.py
+weights/     trained ngram_N.bin model files
+transformer/ word-level GPT2/Qwen2 model + Kaggle training kernel
+eda/         exploration notebooks
+scripts/     pipeline scripts (see above)
 ```
 
 ## Usage

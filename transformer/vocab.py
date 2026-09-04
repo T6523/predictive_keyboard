@@ -1,7 +1,10 @@
-"""Word-level vocab, built straight from clean/train.src.tok (same alnum-only, lowercased
-corpus the n-gram trains on -- see scripts/train_ngram.py). Kept standalone rather than
-reusing weights/ngram_N.counts.pkl so this folder doesn't need the (large) n-gram artifact
-just to get a token->id map.
+"""Word-level vocab. build_notebook.py points this at whatever train.src.tok got uploaded
+to the Kaggle dataset (glob on /kaggle/input/*/train.src.tok) -- in practice that's the
+*raw* data/train.src.tok (99021 unique tokens, symbols kept), not the alnum-stripped
+clean/train.src.tok the n-gram trains on. With MIN_COUNT=1 and BOS/EOS added below, the
+checkpoint's actual vocab_size is 99023. Kept standalone rather than reusing
+weights/ngram_N.counts.pkl so this folder doesn't need the (large) n-gram artifact just to
+get a token->id map.
 
 Also builds the letter-bucket mask used for masked training/eval: every word's first
 character (a-z, 0-9) buckets it, since the task always gives the label's first letter --
