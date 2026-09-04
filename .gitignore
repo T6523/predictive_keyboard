@@ -7,3 +7,8 @@ clean/
 weights/
 .ipynb_checkpoints/
 *.pdf
+transformer/checkpoints/
+transformer/kernel/kernel-metadata.json
+transformer/kernel/output/
+transformer/__pycache__/
+*.zip

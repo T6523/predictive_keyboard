@@ -1,0 +1,16 @@
+{
+  "id": "{USERNAME}/predictive-keyboard-transformer",
+  "title": "predictive-keyboard-transformer",
+  "code_file": "train.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "machine_shape": "NvidiaTeslaT4",
+  "dataset_sources": [{DATASET_SOURCES}],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
