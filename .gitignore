@@ -17,3 +17,7 @@ transformer/__pycache__/
 *.log
 *.txt
 *.json
+!*.template.json
+qwen_kernel/kernel-metadata.json
+qwen_kernel/train_and_eval.py
+qwen_output/
