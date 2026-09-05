@@ -12,3 +12,8 @@ transformer/kernel/kernel-metadata.json
 transformer/kernel/output/
 transformer/__pycache__/
 *.zip
+*.pt
+*.Identifier
+*.log
+*.txt
+*.json
