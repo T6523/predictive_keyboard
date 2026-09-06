@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Push transformer/kernel/train.ipynb to Kaggle, poll till it finishes, pull the checkpoint
+# Push gpt/kernel/train.ipynb to Kaggle, poll till it finishes, pull the checkpoint
 # back, and persist it as a Kaggle dataset so the *next* run can resume from it.
 #
-# Usage: transformer/run_kaggle.sh [--ckpt-dataset SLUG] [--data-dataset SLUG]
+# Usage: gpt/run_kaggle.sh [--ckpt-dataset SLUG] [--data-dataset SLUG]
 #   --ckpt-dataset SLUG   Kaggle dataset (your account) to push checkpoints/*.pt into after
 #                         each run. Created on first use. Pass the same slug next time to
 #                         auto-attach it as a resume input.
@@ -69,5 +69,5 @@ json.dump({"title": slug.split("/", 1)[1], "id": slug, "licenses": [{"name": "CC
 PY
     kaggle datasets create -p output -r zip
   fi
-  echo "next run: transformer/run_kaggle.sh --ckpt-dataset $CKPT_DATASET  (auto-resumes)"
+  echo "next run: gpt/run_kaggle.sh --ckpt-dataset $CKPT_DATASET  (auto-resumes)"
 fi

@@ -2,7 +2,7 @@
 the cell code below. Source of truth is this file, not the .ipynb -- re-run after editing
 models.py / vocab.py / data.py or the cell strings:
 
-    python3 transformer/kernel/build_notebook.py
+    python3 gpt/kernel/build_notebook.py
 """
 import pathlib
 import nbformat as nbf

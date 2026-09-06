@@ -1,4 +1,4 @@
-"""Runnable smoke test for vocab.py + data.py -- no torch needed. python3 transformer/test_data.py"""
+"""Runnable smoke test for vocab.py + data.py -- no torch needed. python3 gpt/test_data.py"""
 import os
 import tempfile
 

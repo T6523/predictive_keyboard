@@ -15,19 +15,21 @@ built by scripts/build_vocab.py from the alnum-only corpus, so it already matche
 column's format; matches Model A's vocab, which Model B was masked to per the pipeline spec).
 
 Usage:
-    python3 predict_accuracy.py --model weights/run_.../model_a.klm --data data/devv_eval.csv
-    python3 predict_accuracy.py --model weights/run_.../model_b.klm --data data/devv_test.csv --limit 2000
+    python3 ngram/predict_accuracy.py --model weights/run_.../model_a.klm --data data/devv_eval.csv
+    python3 ngram/predict_accuracy.py --model weights/run_.../model_b.klm --data data/devv_test.csv --limit 2000
 """
 import argparse
 import csv
+import sys
 import time
 from pathlib import Path
 
 import kenlm
 
-from scripts.symbol_predict import is_symbol_letter, predict_symbol
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
-ROOT = Path(__file__).resolve().parent
+from scripts.symbol_predict import is_symbol_letter, predict_symbol
 
 
 def load_vocab_by_letter(vocab_path):

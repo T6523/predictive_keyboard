@@ -28,9 +28,9 @@ clean/train.src.tok  ──►  lmplz  ──►  weights/ngram_N.arpa  ──�
 
 `scripts/train_ngram.py` (pure Python, pickle-based) is kept for reference/small experiments but is no longer the primary path — `weights/*.bin` files are now KenLM binaries, not pickles.
 
-## Transformer (transformer/)
+## From-scratch GPT2 (gpt/)
 
-A word-level GPT2/Qwen2 model (`transformer/models.py`), trained on Kaggle (`transformer/run_kaggle.sh` → `transformer/kernel/build_notebook.py`). Vocab (`transformer/vocab.py`) is built from whatever `train.src.tok` is attached as the Kaggle input dataset — in practice the **raw** `data/train.src.tok` (99021 unique tokens, symbols kept), not `clean/train.src.tok`. `MIN_COUNT=1` (keep everything) + `<s>`/`</s>` added at index 0/1 → checkpoint `vocab_size` is **99023**.
+A word-level GPT2/Qwen2 model (`gpt/models.py`), trained on Kaggle (`gpt/run_kaggle.sh` → `gpt/kernel/build_notebook.py`). Vocab (`gpt/vocab.py`) is built from whatever `train.src.tok` is attached as the Kaggle input dataset — in practice the **raw** `data/train.src.tok` (99021 unique tokens, symbols kept), not `clean/train.src.tok`. `MIN_COUNT=1` (keep everything) + `<s>`/`</s>` added at index 0/1 → checkpoint `vocab_size` is **99023**.
 
 ## gigaword.tar.gz preprocessing
 
@@ -44,10 +44,14 @@ A word-level GPT2/Qwen2 model (`transformer/models.py`), trained on Kaggle (`tra
 ```
 data/        raw csv/tok files (untouched originals) + gigaword.tar.gz / gigaword.tok
 clean/       cleaned outputs of clean_pipeline.py + clean_alnum.py
-weights/     trained ngram_N.bin model files
-transformer/ word-level GPT2/Qwen2 model + Kaggle training kernel
+weights/     trained ngram_N.bin / .klm model files + vocab.txt (shared candidate pool)
 eda/         exploration notebooks
-scripts/     pipeline scripts (see above)
+scripts/     shared preprocessing/eval scripts (see above), used across all three models
+
+ngram/       KenLM pipeline + next-word accuracy eval + interpolation (report.md §1-4)
+gpt/         from-scratch word-level GPT2/Qwen2 model + Kaggle training/inference kernels (§6)
+qwen/        Qwen2.5-0.5B LoRA fine-tune + Kaggle training/eval kernels (§7)
+ensemble/    cross-model (GPT + n-gram) interpolation/ensembling (§7-8)
 ```
 
 ## Usage

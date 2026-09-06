@@ -1,6 +1,6 @@
 # TODO
 
-- **Fix `predict_accuracy.py` ranking.** Currently argmaxes `BaseScore` (smoothed KN
+- **Fix `ngram/predict_accuracy.py` ranking.** Currently argmaxes `BaseScore` (smoothed KN
   probability) over the full vocab filtered by first letter -- wrong objective for
   exact-match accuracy (optimizes perplexity, not "most likely literal continuation").
   Causes: (1) Kneser-Ney discounting can rank a common word above the true highest-count

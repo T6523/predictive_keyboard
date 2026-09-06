@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Fine-tune unsloth/Qwen2.5-0.5B (LoRA) on the contest corpus, hard-stop at 8h, then run
 constrained next-word eval on devv_eval.csv / devv_test.csv -- same task as scripts/eval.py and
-transformer/, third approach: a pretrained subword LLM instead of a from-scratch word-level model.
+gpt/, third approach: a pretrained subword LLM instead of a from-scratch word-level model.
 
 Kaggle-only (needs a GPU + unsloth/trl/peft/bitsandbytes/transformers, none of which are in this
-repo's local .venv -- same split as transformer/kernel/*, which also only runs on Kaggle).
+repo's local .venv -- same split as gpt/kernel/*, which also only runs on Kaggle).
 Kaggle setup: enable internet (pip install + HF Hub download of the base model both need it --
-the existing transformer/ kernel runs with internet off, this one can't) and, if the image
+the existing gpt/ kernel runs with internet off, this one can't) and, if the image
 doesn't already have them:
     !pip install -q unsloth trl peft bitsandbytes
 
@@ -20,10 +20,11 @@ Real column names (checked against the actual csvs, not assumed): devv_eval.csv 
 have `context`, `first letter`, `answer` -- not history_text/prefix_char/target_next_word.
 
 Usage:
-    python3 train_and_eval.py
-    python3 train_and_eval.py --eval-limit 500 --train-limit-blocks 200   # quick smoke test
+    python3 qwen/train_and_eval.py
+    python3 qwen/train_and_eval.py --eval-limit 500 --train-limit-blocks 200   # quick smoke test
 """
 import argparse
+import copy
 import csv
 import glob
 import random
@@ -38,15 +39,32 @@ try:
     import unsloth  # noqa: F401
 except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "unsloth", "trl", "peft", "bitsandbytes"], check=True)
+try:
+    from peft.import_utils import is_torchao_available
+    is_torchao_available()  # raises if the image's preinstalled torchao is too old for this peft
+except ImportError:
+    # Kaggle's stock image shipped torchao 0.10.0, but peft's LoRA dispatcher unconditionally
+    # requires >=0.16.0 (checked even though our adapter has nothing to do with torchao) --
+    # confirmed via a real run's traceback in eval_kernel/eval_qwen.py (same bootstrap issue).
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U", "peft", "torchao"], check=True)
 
 import numpy as np
 import torch
 from datasets import Dataset
-from transformers import TrainerCallback, TrainingArguments
-from trl import SFTTrainer
+from peft import PeftModel
+from transformers import (
+    AutoModelForCausalLM,
+    DataCollatorForLanguageModeling,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+)
 from unsloth import FastLanguageModel
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
+# ponytail: Kaggle script kernels mount the code dir (ROOT, /kaggle/src) read-only -- only
+# /kaggle/working is writable. Falls back to ROOT when running locally (no /kaggle/working there).
+WORK_DIR = Path("/kaggle/working") if Path("/kaggle/working").exists() else ROOT
 
 
 # mirrors scripts/symbol_predict.py exactly (verified against dev_set/devv_eval/devv_test:
@@ -61,7 +79,7 @@ SEED = 42
 MODEL_NAME = "unsloth/Qwen2.5-0.5B"
 MAX_SEQ_LEN = 1024
 TIME_BUDGET_SEC = 8 * 3600
-OUT_DIR = ROOT / "weights" / "qwen_8hr_checkpoint"
+OUT_DIR = WORK_DIR / "weights" / "qwen_8hr_checkpoint"
 
 
 def seed_everything(seed=SEED):
@@ -149,25 +167,61 @@ def batched(seq, n):
         yield seq[i : i + n]
 
 
+def _batch_repeat_past(past, n):
+    """Version-robust past_key_values repeat -- see eval_kernel/eval_qwen.py's copy of this
+    function for why (newer transformers' DynamicCache.batch_repeat_interleave mutates in place
+    and returns None; Kaggle's shipped 5.5.0 instead returns the legacy tuple-of-(key,value)
+    format, which has no such method at all)."""
+    if hasattr(past, "batch_repeat_interleave"):
+        past.batch_repeat_interleave(n)
+        return past
+    return tuple((k.repeat_interleave(n, dim=0), v.repeat_interleave(n, dim=0)) for k, v in past)
+
+
 @torch.no_grad()
-def best_candidate(model, device, context_ids, candidates, max_batch=128):
+def best_candidate(model, device, context_ids, candidates, max_batch=64):
     """candidates: list[(word, token_id_tuple)]. Picks argmax sum_i log P(tok_i | h, tok_<i>),
-    teacher-forced. Grouped by shared token length and run as one batched forward per group
-    (most words are 1 Qwen token -- only rare multi-token candidates cost a second/third group)
-    instead of one forward per candidate."""
+    teacher-forced. Grouped by shared token length; context is encoded ONCE (one forward) and its
+    past_key_values reused across every candidate batch, so each batch only pays for its own 1-6
+    new tokens instead of re-running the full context through every layer per batch.
+
+    Was originally a per-batch full recompute gated by logits_to_keep=L (the OOM fix: an 8hr run
+    hit model(seqs).logits materializing the FULL (batch, ctx_len+L, vocab) tensor regardless of
+    L, and Qwen's ~152k vocab made that ~37GB of logits alone at batch=128, past a T4's 14.56GB).
+    That version also had a real correctness bug -- logits_to_keep=L returns the model's LAST L
+    logit rows, which predict tokens L+1..2L relative to context end, not tokens 1..L, so scoring
+    target=candidate directly against those rows was off by one position (verified empirically,
+    including the L=1 case). Replaced wholesale with the KV-cache version below, kept in sync with
+    eval_kernel/eval_qwen.py's best_candidate() -- see that file's module docstring for the
+    other bug this caught (DynamicCache.batch_repeat_interleave mutates in place, returns None)."""
+    ctx = torch.tensor([context_ids], device=device)
+    out = model(ctx, use_cache=True)
+    base_past = out.past_key_values
+    ctx_last_logp = torch.log_softmax(out.logits[0, -1, :].float(), dim=-1)
+    ctx_len = len(context_ids)
+
     by_len = {}
     for w, ids in candidates:
         by_len.setdefault(len(ids), []).append((w, ids))
-    ctx_len = len(context_ids)
+
     best_w, best_s = None, float("-inf")
     for L, group in by_len.items():
         for chunk in batched(group, max_batch):
             words, id_lists = zip(*chunk)
-            seqs = torch.tensor([context_ids + list(ids) for ids in id_lists], device=device)
-            logits = model(seqs).logits
-            logp = torch.log_softmax(logits[:, ctx_len - 1 : ctx_len - 1 + L, :].float(), dim=-1)
-            target = torch.tensor(id_lists, device=device)
-            score = logp.gather(-1, target.unsqueeze(-1)).squeeze(-1).sum(dim=-1)
+            first_term = torch.stack([ctx_last_logp[ids[0]] for ids in id_lists])
+            if L == 1:
+                score = first_term
+            else:
+                batch_past = _batch_repeat_past(copy.deepcopy(base_past), len(chunk))
+                target = torch.tensor(id_lists, device=device)
+                cache_position = torch.arange(ctx_len, ctx_len + L, device=device)
+                logits = model(target, past_key_values=batch_past, cache_position=cache_position,
+                                use_cache=False).logits
+                logp = torch.log_softmax(logits.float(), dim=-1)
+                # logp[:, j] predicts target[:, j+1] (j=0..L-2); target[:, 0]'s own probability is
+                # first_term, already scored off the context pass.
+                rest = logp[:, :-1, :].gather(-1, target[:, 1:].unsqueeze(-1)).squeeze(-1).sum(dim=-1)
+                score = first_term + rest
             i = int(score.argmax())
             if score[i].item() > best_s:
                 best_s, best_w = score[i].item(), words[i]
@@ -263,20 +317,17 @@ def main():
         seed=SEED,
     )
 
-    # ponytail: dataset already has input_ids/labels (pre-tokenized above), so no dataset_text_field/
-    # formatting_func is passed -- SFTTrainer is expected to skip its own tokenization when those
-    # columns are already present. Untested against the exact trl version Kaggle ships (no local
-    # env here to pin against); if it errors on this, the fallback is a plain
-    # transformers.Trainer + DataCollatorForLanguageModeling(tokenizer, mlm=False), which does the
-    # identical causal-LM step without trl's dataset-format assumptions.
-    trainer = SFTTrainer(
+    # ponytail: dataset already has input_ids/labels (pre-tokenized above) so SFTTrainer buys nothing
+    # here -- it exists to turn raw text into that pair, we already did it. Plain Trainer +
+    # DataCollatorForLanguageModeling(mlm=False) does the identical causal-LM step without chasing
+    # trl's SFTTrainer/SFTConfig API churn (v5-era trl renamed tokenizer->processing_class and moved
+    # max_seq_length/packing into SFTConfig -- confirmed broken on Kaggle's shipped version).
+    trainer = Trainer(
         model=model,
-        tokenizer=tokenizer,
         train_dataset=train_ds,
         args=training_args,
         callbacks=[TimeBudgetCallback(args.time_budget)],
-        max_seq_length=MAX_SEQ_LEN,
-        packing=False,
+        data_collator=DataCollatorForLanguageModeling(tokenizer, mlm=False),
     )
 
     print("--- training ---")
@@ -302,15 +353,26 @@ def main():
         print(f"saved -> {args.out / 'loss_curve.png'} ({len(steps)} points)")
 
     print("--- constrained eval ---")
-    FastLanguageModel.for_inference(model)
+    # ponytail: reload plain (no unsloth) instead of FastLanguageModel.for_inference(model) on the
+    # live training model -- unsloth's patched forward routes any past_key_values-is-not-None call
+    # through its single-token generate() decode path (hard-asserts q_len==1), incompatible with
+    # best_candidate()'s multi-token KV-cache batches. See eval_kernel/eval_qwen.py's module
+    # docstring (bug #3) for the traceback and the merge_and_unload() fix, reused here verbatim --
+    # args.out already has the adapter this training run just saved two lines up.
+    del model
+    torch.cuda.empty_cache()
+    base = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=compute_dtype)
+    model = PeftModel.from_pretrained(base, str(args.out)).merge_and_unload()
+    model.eval().to(device)
+
     vocab_by_letter = load_vocab_by_letter(vocab_path)
     vocab_cache = tokenize_vocab(tokenizer, vocab_by_letter)
     max_ctx = MAX_SEQ_LEN - 8  # room for the longest candidate's tokens
 
     eval_acc = run_eval(eval_path, model, tokenizer, device, vocab_cache, vocab_by_letter, max_ctx,
-                         args.eval_limit, ROOT / "devv_eval_predictions.csv")
+                         args.eval_limit, WORK_DIR / "devv_eval_predictions.csv")
     test_acc = run_eval(test_path, model, tokenizer, device, vocab_cache, vocab_by_letter, max_ctx,
-                         args.eval_limit, ROOT / "devv_test_predictions.csv")
+                         args.eval_limit, WORK_DIR / "devv_test_predictions.csv")
     print(f"devv_eval accuracy: {eval_acc:.4f}")
     print(f"devv_test accuracy: {test_acc:.4f}")
 

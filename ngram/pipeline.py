@@ -6,9 +6,9 @@ Model A: data/train.src.tok
 Model B: data/gigaword.tok  (assumed already vocab-masked to match Model A)
 
 Usage:
-    python3 pipeline.py
-    python3 pipeline.py --order 5 --memory 12G --prune 0 0 1
-    python3 pipeline.py --self-test     # tiny end-to-end smoke test, no real data needed
+    python3 ngram/pipeline.py
+    python3 ngram/pipeline.py --order 5 --memory 12G --prune 0 0 1
+    python3 ngram/pipeline.py --self-test     # tiny end-to-end smoke test, no real data needed
 
 Requires scripts/bin/{lmplz,build_binary} (build with scripts/build_kenlm.sh) and the
 `kenlm` python package (pip install https://github.com/kpu/kenlm/archive/master.zip).
@@ -31,7 +31,7 @@ import tempfile
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BIN = ROOT / "scripts" / "bin"
 
 

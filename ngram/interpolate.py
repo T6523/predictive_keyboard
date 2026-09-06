@@ -12,7 +12,7 @@ Tune lambda on devv_eval (grid search, minimize eval perplexity), then apply tha
 to devv_test and report test perplexity vs solo A / solo B.
 
 Usage:
-    python3 interpolate.py --eval-preds weights/run_.../devv_eval_predictions.csv \
+    python3 ngram/interpolate.py --eval-preds weights/run_.../devv_eval_predictions.csv \
                             --test-preds weights/run_.../devv_test_predictions.csv
 """
 import argparse
@@ -20,7 +20,7 @@ import csv
 import math
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_rows(path):
