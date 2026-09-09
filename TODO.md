@@ -11,3 +11,7 @@
   `log_prob` only as tiebreak within the same order -- replicates `eval_ngram.py`'s
   per-order argmax-on-observed-counts logic on top of the KenLM trie instead of the raw
   count pickle. Re-run accuracy on devv_eval/devv_test for model_a and model_b after.
+
+Try rope, swiglu, gqa
+  - llama3 / gemma 2
+  - rwkv
