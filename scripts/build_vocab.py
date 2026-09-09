@@ -4,14 +4,14 @@ enumeration, only word->id lookup). One file, shared by every ngram_N.bin traine
 the same corpus.
 
 Usage:
-    python3 build_vocab.py --train ../clean/train.src.tok --out ../weights/vocab.txt
+    python3 build_vocab.py --train ../data/train_final.src.tok --out ../weights/vocab.txt
 """
 import argparse
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train", default="../clean/train.src.tok")
+    ap.add_argument("--train", default="../data/train_final.src.tok")
     ap.add_argument("--out", default="../weights/vocab.txt")
     args = ap.parse_args()
 

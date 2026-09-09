@@ -61,8 +61,8 @@ def tokenize_line(line, vocab):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=str(DATA / "gigaword.tar.gz"))
-    ap.add_argument("--train-vocab", default=str(DATA / "train.src.tok"))
-    ap.add_argument("--out", default=str(DATA / "gigaword.tok"))
+    ap.add_argument("--train-vocab", default=str(DATA / "train_final.src.tok"))
+    ap.add_argument("--out", default=str(DATA / "gigaword_masked.tok"))
     ap.add_argument("--limit", type=int, default=None,
                      help="only process the first N tar members (quick test run)")
     args = ap.parse_args()
