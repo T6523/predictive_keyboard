@@ -36,6 +36,24 @@ literal `[`/`]` (dev: 124 bracket answers, 0.13% of rows; test: 47 raw `[` conte
 tokens, 353/60 rows with `[`/`]` as the given first letter) — a structural,
 un-prunable train/eval gap, not a rare-word coverage issue.
 
+**Length distribution** (tokens = whitespace-split, `data/*` measured directly):
+
+| | n | min | p10 | p25 | median | mean | p75 | p90 | p99 | max |
+|---|---|---|---|---|---|---|---|---|---|---|
+| train sentence length | 3,803,957 | 10 | 23 | 28 | 33 | 33.29 | 38 | 44 | 57 | 135 |
+| dev context length | 94,488 | 7 | 17 | 20 | 24 | 24.57 | 29 | 33 | 42 | 71 |
+| test context length | 94,826 | 7 | 17 | 20 | 24 | 24.52 | 28 | 33 | 42 | 72 |
+| dev answer length (chars) | 94,488 | 1 | 1 | 2 | 4 | 4.43 | 6 | 8 | 12 | 18 |
+
+Train sentences are tighter and shorter than dev/test context length alone (median 33 vs
+24) — expected, since dev/test `context` is a left-truncated prefix of a longer original
+sentence, not a full sentence. Long tail is thin either way (p99 under 60 tokens on all
+three); a handful of train outliers reach 135 tokens.
+
+Dev's `first letter` covers 47 distinct values (26 letters + digits/punctuation), heavily
+skewed: `t`/`a`/`s` alone cover ~30% of rows (12,934 / 9,921 / 6,751), matching English
+letter-frequency-as-word-starts, not uniform over the alphabet.
+
 Full EDA lives in `eda/*.ipynb`.
 
 ## Key EDA findings
@@ -212,20 +230,75 @@ exact counting, instead of the approximate in-RAM streaming prune here).
 
 ## Next: pretrained transformer base model
 
-Weights: **[mistralai/Mistral-7B-v0.1](https://huggingface.co/mistralai/Mistral-7B-v0.1)** —
-open weight, Apache 2.0, no gated access.
+Initial pick by benchmark (HellaSwag, cross-validated against ARC/MMLU) was
+**mistralai/Mistral-7B-v0.1**. That was a proxy — HellaSwag isn't this task (no
+first-letter constraint, multiple-choice not open-vocab). Actually measuring the real
+task (zero-shot, no fine-tune, on `dev_set_final.csv`) overturned it.
 
-**Why:** need >80% accuracy ceiling on a benchmark close to this task's shape
-(context-conditioned next-word prediction), fitting an 8GB VRAM RTX 4060 Laptop for
-training. HellaSwag (0-shot) 84.0% self-reported, 83.2% independently reproduced via
-EleutherAI's eval harness — two-source agreement, no outlier vs. its ARC-Challenge
-(60.0%) / MMLU (60.1%) scores, so the number isn't a contamination fluke. 7B params
-fits via 4-bit QLoRA (~4-4.5GB weights + adapter/optimizer overhead) on this machine,
-same fine-tune path already used for `qwen/` LoRA. Runner-up Qwen2.5-7B and
-Llama-3.1-8B also clear 80% and are open weight, but had noisier/less cross-validated
-scraped numbers at pick time — re-check before swapping in.
+**Final pick: [Qwen/Qwen2.5-3B](https://huggingface.co/Qwen/Qwen2.5-3B)** — open
+weight, Apache 2.0, no gated access. Beats Mistral-7B on the actual task despite being
+less than half the size, and ~1.7x faster at inference. Real-task measurement beats a
+benchmark proxy every time it's cheap enough to run — it was here (~1 min per model
+on a 2000-row sample).
 
-Still open: HellaSwag isn't this task (no first-letter constraint, multiple-choice not
-open-vocab) — treat the 80%+ as a backbone-quality filter, not a predicted score on
-`dev_set_final.csv`. Actual accuracy must be measured post-fine-tune the same way as
-the n-gram baseline (`scripts/infer_ngram.py`-style harness).
+**Model shortlist, zero-shot (no fine-tune), same random 2000-row seed-42 sample of
+`dev_set_final.csv`, first-letter-constrained greedy decoding:**
+
+| model | word acc | overall |
+|---|---|---|
+| **Qwen2.5-3B** | **70.26%** | **71.55%** |
+| Mistral-7B-v0.1 | 69.92% | 71.25% |
+| granite-3.1-2b-base | 68.10% | 69.65% |
+| Qwen2.5-1.5B | 67.99% | 69.55% |
+| gemma-2-2b | 67.99% | 69.55% |
+| Falcon3-3B-Base | 61.92% | 64.20% |
+| SmolLM2-1.7B | 61.07% | 63.45% |
+| phi-2 | 59.08% | 62.15% |
+
+Llama-3.2-3B untested (gated, access request denied). Every model here scored ~0% on
+`number` in this table except phi-2 (20.45%) — see below, that's not a model gap.
+
+**Zero-shot ceiling for Qwen2.5-3B: word 70.20%, already well clear of the n-gram
+baseline's 55.51% with zero training** — fine-tuning needs to close a real gap, not a
+rounding error, and a flat 80% target is likely above this task's intrinsic entropy
+(see `TODO.md`'s pasted "Suggestion" for the reasoning).
+
+**Number-category finding:** every `number` answer in dev is anonymized — the digit
+`1` repeated to the original number's length (`1234` → `1111`; confirmed on all 2023
+number-rows in dev, 100%), and `first letter` is always `'1'`. No LLM generates a
+repeated-`1` string (not real text), which is the actual reason every model above
+scores near-0% there — not a capability gap. A real word never starts with a digit,
+so a digit first-letter is an unambiguous number-placeholder signal, routed around the
+model the same way `symbol` already is. The n-gram baseline already exploits this
+(71.68% on `number`, by conditioning the digit-length on context) — better than a flat
+majority-length guess (39.6%, the most common length in dev).
+
+**Full production config for Qwen2.5-3B — word from the LLM, number from the n-gram,
+symbol deterministic (letter copy), same 2000-row sample:**
+
+| Alpha (LLM, word) | Number (n-gram) | Symbol (deterministic) | **Total** |
+|---|---|---|---|
+| 70.20% (1237/1762) | 81.82% (36/44) | 99.48% (193/194) | **73.30% (1466/2000)** |
+
+This ensemble (`scripts/infer_transformer.py --ngram-model ...`) is the real
+zero-shot floor to beat post-fine-tune, not the flat-guess 72.15% or the pure-LLM
+71.55% numbers above.
+
+**Checked whether Qwen3.5 (released March 2026, after the original shortlist) beats
+Qwen2.5-3B — it doesn't.** Same 2000-row seed-42 sample, `--mask-number` mode: number
+rows also go through the model (not the n-gram/flat-guess routing above), predicted
+digit string masked to `1`×length before scoring — a length-only check, no ensemble:
+
+| model | word acc | number (masked, length-only) | overall | rows/s |
+|---|---|---|---|---|
+| **Qwen2.5-3B** (kept) | **70.26%** | — (not run this way) | 71.55% | 38.14 |
+| Qwen3.5-4B-Base | 66.46% | 11.36% | 68.45% | 9.13 |
+| Qwen3.5-2B-Base | 61.18% | 25.00% | 64.10% | 15.70 |
+
+Qwen2.5-3B still wins on word accuracy and is 2.5-4x faster per row in this venv.
+Qwen3.5 is a hybrid linear-attention/Mamba-style architecture (not plain transformer
+attention like Qwen2.5) tuned for long-context/multimodal use, not short next-word
+completion — and this venv lacks the `flash-linear-attention`/`causal-conv1d` kernels
+its fast path needs (ABI mismatch: prebuilt `.so`s are cp310, venv is cp312), forcing a
+slow torch fallback, though that's a speed penalty only, not a correctness one. Newer
+and bigger did not mean better here — kept Qwen2.5-3B.

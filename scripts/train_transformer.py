@@ -1,118 +1,79 @@
-"""QLoRA fine-tune mistralai/Mistral-7B-v0.1 on train_final.src.tok for the predictive
-keyboard task: given left context + first letter of next word, predict the word.
+"""Plain causal-LM QLoRA fine-tune on train_final.src.tok (TODO.md Suggestion item 2):
+no more per-sentence context+"[letter]"->target objective -- every position in every
+packed sequence is now a supervised target, ~30x more supervision per token processed
+vs the old one-target-per-sentence scheme. The first-letter constraint moves entirely
+to inference (infer_transformer.py's logit mask over `boundary + letter`-prefixed
+vocab pieces); baking "[letter]" into the training prompt taught the model nothing the
+mask doesn't already provide for free, and cost ~30x sample efficiency for it.
 
-Builds training examples on the fly from raw sentences (no separate context/answer CSV
-needed for train) -- for each sentence, pick a random split point i, use tokens[:i] as
-context and tokens[i] as target, first letter = target[0]. Loss is masked to the target
-word + EOS only (prompt tokens don't contribute), matching what dev/test actually score.
+Uses Unsloth's FastLanguageModel (2-5x faster, ~50% less VRAM) + TRL's SFTTrainer with
+packing=True: many short lines get packed into one training sequence instead of each
+paying full padding, so p99 line length (~57 tok, see TODO.md Data statistics) barely
+matters -- packing amortizes it away.
 
 Usage:
     python3 train_transformer.py --train ../data/train_final.src.tok \
-        --out ../weights/mistral7b_lora --max-steps 2000 --max-lines 2000000
+        --out ../weights/qwen3b_lora --max-steps 2000 --max-lines 2000000
 
-Requires: torch, transformers, peft, bitsandbytes, accelerate (already in .venv).
+    # 6h Kaggle chunk, second session picking up where session 1 left off:
+    python3 train_transformer.py --no-4bit --max-hours 6 --skip-lines 900000 \
+        --out ../weights/qwen3b_lora --resume ../weights/qwen3b_lora
+
+Requires: torch, transformers, trl, peft, bitsandbytes, unsloth (already in .venv).
 """
 import argparse
-import random
+import time
 
 import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    Trainer,
-    TrainingArguments,
-)
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
-MODEL_ID = "mistralai/Mistral-7B-v0.1"
+MODEL_ID = "Qwen/Qwen2.5-3B"
 
 
-def make_example(line, rng):
-    """One sentence -> (context_str, first_letter, target_word). None if unsplittable.
-
-    Split point is never the first token (need >=1 token of context) or the sentence's
-    only token.
+def load_lines(path, max_lines, skip=0):
+    """Read up to max_lines non-empty lines starting after skip raw lines (0 = whole
+    file). skip lets a later Kaggle session train on the next chunk of the corpus
+    instead of repeating the first one -- see --skip-lines / --max-hours below.
     """
-    toks = line.split()
-    if len(toks) < 2:
-        return None
-    i = rng.randint(1, len(toks) - 1)
-    return " ".join(toks[:i]), toks[i][0], toks[i]
-
-
-def build_features(example, tokenizer, max_len=256):
-    """Tokenize prompt+target, mask prompt tokens to -100 so loss is target-word-only."""
-    context, letter, target = example
-    prompt = f"{context} [{letter}]"
-    prompt_ids = tokenizer(prompt, add_special_tokens=True).input_ids
-    target_ids = tokenizer(" " + target, add_special_tokens=False).input_ids + [tokenizer.eos_token_id]
-
-    input_ids = (prompt_ids + target_ids)[:max_len]
-    labels = ([-100] * len(prompt_ids) + target_ids)[:max_len]
-    return {"input_ids": input_ids, "labels": labels, "attention_mask": [1] * len(input_ids)}
-
-
-class SentenceDataset(torch.utils.data.Dataset):
-    """Lazily samples a random split per __getitem__ -- same sentence yields different
-    (context, target) pairs across epochs, cheap way to multiply examples out of 3.8M lines.
-    """
-
-    def __init__(self, path, tokenizer, max_lines, max_len, seed=0):
-        with open(path, encoding="utf-8") as f:
-            self.lines = [next(f) for _ in range(max_lines)] if max_lines else f.readlines()
-        self.tokenizer = tokenizer
-        self.max_len = max_len
-        self.rng = random.Random(seed)
-
-    def __len__(self):
-        return len(self.lines)
-
-    def __getitem__(self, idx):
-        ex = None
-        while ex is None:  # skip degenerate (single-token) lines
-            ex = make_example(self.lines[idx].strip(), self.rng)
-            if ex is None:
-                idx = self.rng.randrange(len(self.lines))
-        return build_features(ex, self.tokenizer, self.max_len)
-
-
-def collate(batch, pad_id):
-    max_len = max(len(b["input_ids"]) for b in batch)
-    input_ids, labels, attn = [], [], []
-    for b in batch:
-        pad = max_len - len(b["input_ids"])
-        input_ids.append(b["input_ids"] + [pad_id] * pad)
-        labels.append(b["labels"] + [-100] * pad)
-        attn.append(b["attention_mask"] + [0] * pad)
-    return {
-        "input_ids": torch.tensor(input_ids),
-        "labels": torch.tensor(labels),
-        "attention_mask": torch.tensor(attn),
-    }
+    with open(path, encoding="utf-8") as f:
+        for _ in range(skip):
+            next(f, None)
+        if max_lines:
+            lines = [next(f, "").strip() for _ in range(max_lines)]
+        else:
+            lines = [line.strip() for line in f]
+    return [line for line in lines if line]
 
 
 def demo():
-    """Self-check: split logic + masking, no model/network needed."""
-    rng = random.Random(42)
-    ex = make_example("the quick brown fox jumps", rng)
-    assert ex is not None
-    context, letter, target = ex
-    assert context.split()[-1] != target  # target excluded from context
-    assert letter == target[0]
-    assert make_example("solo", rng) is None  # single-token line -> unsplittable
-    print("demo ok:", ex)
+    """Self-check: line loading + empty-line filtering, no model/network needed."""
+    import os
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write("the quick brown fox\n\nsolo\n")
+        path = f.name
+    lines = load_lines(path, 0)
+    skipped = load_lines(path, 0, skip=1)
+    os.unlink(path)
+    assert lines == ["the quick brown fox", "solo"]
+    assert skipped == ["solo"]
+    print("demo ok:", lines, skipped)
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default=MODEL_ID)
     ap.add_argument("--train", default="../data/train_final.src.tok")
-    ap.add_argument("--out", default="../weights/mistral7b_lora")
-    ap.add_argument("--max-lines", type=int, default=2_000_000, help="0 = full 3.8M-line file")
-    ap.add_argument("--max-steps", type=int, default=2000)
+    ap.add_argument("--out", default="../weights/qwen3b_lora")
+    ap.add_argument("--skip-lines", type=int, default=0, help="skip this many raw lines before reading -- point at the next chunk for a follow-up session (see --max-hours)")
+    ap.add_argument("--max-lines", type=int, default=900_000, help="0 = rest of the 3.8M-line file. Default is a buffer for one ~6h chunk at measured throughput (~1200 tok/s local) -- --max-hours is what actually stops the run")
+    ap.add_argument("--max-hours", type=float, default=0, help="stop after this many wall-clock hours regardless of --max-steps (0 = disabled, step-count only) -- use this to fit a Kaggle session")
+    ap.add_argument("--max-steps", type=int, default=100_000, help="hard upper bound; --max-hours is the real stopper for a timed session")
+    ap.add_argument("--resume", default=None, help="LoRA adapter dir to resume from (e.g. previous chunk's --out) instead of the base model's fresh adapter")
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--grad-accum", type=int, default=4)
-    ap.add_argument("--max-len", type=int, default=256)
+    ap.add_argument("--max-seq-length", type=int, default=512, help="packed sequence length")
+    ap.add_argument("--no-4bit", action="store_true", help="bf16 LoRA instead of QLoRA (more VRAM, more throughput -- use on Kaggle T4x2)")
     ap.add_argument("--demo", action="store_true", help="run self-check and exit")
     args = ap.parse_args()
 
@@ -120,44 +81,61 @@ def main():
         demo()
         return
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    from unsloth import FastLanguageModel  # must import before trl/transformers (Unsloth's own requirement --
+    from datasets import Dataset            # importing it later applies its monkeypatches incorrectly and
+    from trl import SFTConfig, SFTTrainer   # corrupts SFTConfig.eos_token via a to_dict() round-trip bug)
+    from transformers import TrainerCallback
 
-    bnb = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
+    class TimeLimit(TrainerCallback):
+        """ponytail: wall-clock stop, not a step-count guess -- packed-sequence count
+        per session is hard to predict exactly, wall time isn't."""
+        def __init__(self, max_hours):
+            self.deadline = time.time() + max_hours * 3600 if max_hours else None
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if self.deadline and time.time() >= self.deadline:
+                control.should_training_stop = True
+            return control
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        args.resume or args.model, max_seq_length=args.max_seq_length, load_in_4bit=not args.no_4bit,
     )
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, quantization_config=bnb, device_map="auto")
-    model = prepare_model_for_kbit_training(model)
-    model = get_peft_model(model, LoraConfig(
-        r=16, lora_alpha=32, lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    ))
-    model.print_trainable_parameters()
+    if not args.resume:
+        model = FastLanguageModel.get_peft_model(
+            model, r=16, lora_alpha=32, lora_dropout=0.05,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        )
 
-    ds = SentenceDataset(args.train, tokenizer, args.max_lines, args.max_len)
+    lines = load_lines(args.train, args.max_lines, args.skip_lines)
+    ds = Dataset.from_dict({"text": lines})
 
-    trainer = Trainer(
+    # T4 (Kaggle's free GPU) has no fast bf16 tensor cores (Turing, needs Ampere+) --
+    # bf16=True there silently runs slow/emulated. Detect instead of assuming the 4060's bf16.
+    bf16_ok = torch.cuda.is_bf16_supported()
+    trainer = SFTTrainer(
         model=model,
         train_dataset=ds,
-        data_collator=lambda b: collate(b, tokenizer.pad_token_id),
-        args=TrainingArguments(
+        args=SFTConfig(
             output_dir=args.out,
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.grad_accum,
             max_steps=args.max_steps,
-            bf16=True,
+            max_length=args.max_seq_length,
+            packing=True,
+            dataset_text_field="text",
+            bf16=bf16_ok,
+            fp16=not bf16_ok,
             logging_steps=20,
             save_steps=500,
             save_total_limit=2,
             report_to=[],
         ),
+        callbacks=[TimeLimit(args.max_hours)],
     )
     trainer.train()
     model.save_pretrained(args.out)
     tokenizer.save_pretrained(args.out)
+    return trainer.state.log_history
 
 
 if __name__ == "__main__":

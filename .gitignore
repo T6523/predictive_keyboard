@@ -26,3 +26,6 @@ gpt/infer_output/
 qwen/eval_kernel/kernel-metadata.json
 qwen/eval_output/
 *.csv
+scripts/unsloth_complied_cache
+unsloth_compiled_cache
+kaggle/*.json
