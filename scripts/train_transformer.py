@@ -120,6 +120,11 @@ def main():
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.grad_accum,
             max_steps=args.max_steps,
+            warmup_steps=30,  # absolute count, not Unsloth's default warmup_steps=0.1 (a FRACTION
+                              # of max_steps on transformers>=5.0) -- max_steps here is a huge
+                              # safety cap for a --max-hours-limited run, not the real step count,
+                              # so a ratio-based warmup silently computes a 10,000+-step ramp that
+                              # a several-hundred-step run never gets past: peak LR never reached.
             max_length=args.max_seq_length,
             packing=True,
             dataset_text_field="text",

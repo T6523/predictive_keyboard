@@ -29,3 +29,5 @@ qwen/eval_output/
 scripts/unsloth_complied_cache
 unsloth_compiled_cache
 kaggle/*.json
+status.md 
+TODO.md 

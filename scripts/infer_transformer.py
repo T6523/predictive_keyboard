@@ -53,7 +53,7 @@ def detect_boundary(tokenizer):
             counts[piece[:1]] += 1
     return max(counts, key=counts.get)
 CAT_NUMBER = re.compile(r"[0-9]+")
-CAT_WORD = re.compile(r"[a-z']+", re.IGNORECASE)
+CAT_WORD = re.compile(r"(?=.*[a-z])[a-z']+", re.IGNORECASE)  # >=1 real letter -- a bare "'" isn't a word
 
 
 def categorize(tok):
@@ -215,10 +215,11 @@ def main():
     ap.add_argument("--print-sample", type=int, default=10, help="print first N alnum predictions for hand-check")
     ap.add_argument("--ngram-model", default=None, help="if set, use this n-gram model for number-category rows instead of the flat '11' guess")
     ap.add_argument("--mask-number", action="store_true", help="route number rows through the model like alpha rows, then mask the prediction to '1'*len before scoring -- checks length prediction only, no ngram, no ensemble")
+    ap.add_argument("--lora", default=None, help="if set, load this PEFT/LoRA adapter dir on top of --model (e.g. a Kaggle-trained checkpoint) instead of running the bare base model")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.lora or args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
@@ -228,7 +229,13 @@ def main():
         load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16,
     )
     model = AutoModelForCausalLM.from_pretrained(args.model, quantization_config=bnb, device_map="auto")
+    if args.lora:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, args.lora)
     model.eval()
+    model.generation_config.max_length = None  # silence the harmless but noisy "both max_new_tokens
+                                                # and max_length are set" warning generate() prints
+                                                # every call -- max_new_tokens already wins either way
 
     vocab_size = model.get_output_embeddings().weight.shape[0]
     masks = build_letter_masks(tokenizer, boundary, device, vocab_size)
@@ -300,7 +307,8 @@ def main():
             cat_correct[cat] = cat_correct.get(cat, 0) + correct
             w.writerow([r["context"], r["first letter"], r["answer"], cat, pred, correct])
 
-    print(f"\n--- zero-shot accuracy ({args.model}, no fine-tune) ---")
+    label = f"{args.model} + LoRA {args.lora}" if args.lora else f"{args.model}, zero-shot no fine-tune"
+    print(f"\n--- accuracy ({label}) ---")
     tot_c = tot_n = 0
     for cat in ("word", "symbol", "number"):
         c, n = cat_correct.get(cat, 0), cat_total.get(cat, 0)

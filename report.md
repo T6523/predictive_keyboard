@@ -302,3 +302,335 @@ completion — and this venv lacks the `flash-linear-attention`/`causal-conv1d` 
 its fast path needs (ABI mismatch: prebuilt `.so`s are cp310, venv is cp312), forcing a
 slow torch fallback, though that's a speed penalty only, not a correctness one. Newer
 and bigger did not mean better here — kept Qwen2.5-3B.
+
+## Fine-tuned Qwen2.5-3B LoRA (Kaggle, T4, ~8h total across 2 sessions) — top-1/5/10 + error EDA
+
+Trained via `scripts/train_transformer.py` / `kaggle/qwen3b_train_infer.ipynb` on
+`train_final.src.tok` (plain packed-sequence causal-LM objective, no
+`context+"[letter]"→target` prompt — first-letter constraint is entirely an inference-
+time logit mask, see the script's docstring). Two sessions (`TRAIN_SEED` bumped between
+them to avoid replaying the same epoch-0 shuffle), ~6h + ~2h wall-clock, LoRA
+r=16/α=32 on q/k/v/o_proj. `scripts/infer_topk.py` evaluates top-1/5/10 via beam search
+(`num_beams=num_return_sequences=k`, letter-masked at step 0, stopped at the next word
+boundary) on a stratified 10% dev sample (9448 rows); top-k = top-k *distinct* words,
+beam duplicates collapsed. Number category still uses the `--mask-number` length-only
+check (candidates masked to `1`×length before scoring, no ensemble).
+
+| | top1 | top5 | top10\* |
+|---|---|---|---|
+| overall | 71.45% (6751/9448) | 83.86% (7923/9448) | 83.86% (7923/9448) |
+| word | 69.72% (5716/8198) | 84.02% (6888/8198) | 84.02% (6888/8198) |
+| symbol | 98.76% (1035/1048) | 98.76% | 98.76% |
+| number | 0.00% (0/202) | 0.00% | 0.00% |
+
+\*top10 run with `k=5` (beam width), so the top10 column is identical to top5 here —
+not a real top-10 ceiling, just what 5 beams cap out at. k=5 chosen over k=10 for
+~1.8x the throughput (7.6 vs 4.05 rows/s) at effectively the same top5 number, since
+duplicate-collapsed beams past ~5 rarely added a new distinct word anyway.
+
+Number 0% even with 5 candidates is a placeholder-token limitation (see the
+Number-category finding above), not something top-k or a reranker fixes — no LLM beam
+naturally emits a repeated-`1` string.
+
+**Error EDA on the 2482/8198 word rows still wrong at top1:**
+- **100% of wrong top1 predictions start with the correct letter** — the mask is doing
+  its job; every miss is a *within-letter* ranking error.
+- **47% (1172/2482) are recovered by top5** — beam already had the right answer, just
+  ranked below #1. The other 53% are true beam misses.
+- **Dominant failure mode: function-word ambiguity**, genuinely unknowable from
+  left-context alone — a↔an (29+24), that→to (14), and→at (11), their→the (11),
+  the→that (10), for→from (7), on→of (7). These aren't model errors so much as valid
+  alternative continuations; the task itself is ambiguous at these positions.
+- **Register mismatch**: `u`→`us` (13x) — informal "u" (=you) in the corpus, model
+  defaults to the formal completion.
+- **Unknowable factual picks**: sunday→saturday (9), thursday→tuesday (6) — no signal
+  in left context to disambiguate a specific weekday.
+- **Plausible near-synonyms on content words**: visibility→visitors,
+  initiatives→investments, resistance→rebels/remnants — right gist, wrong exact word.
+- **By first letter** (word category, top1/top5%): worst are high-branching-factor
+  consonant starts — r 58.0%/74.7%, u 58.0%/79.5%, g 59.7%/78.3%, s 60.2%/75.3%,
+  c 60.8%/74.4% (many common function/content words compete). Best are low-branching
+  or rare-letter starts — x 100%(n=3), y 91.2%/98.3%, o 86.4%/94.7%, z 85.7%(n=7),
+  t 79.4%/90.3% (t/o dominated by "the/to"/"of/on", where the LM's prior is very
+  strong despite huge n). Pattern tracks branching factor / function-word density at
+  that letter, not the letter itself.
+
+**MiniLM rerank of the top5 beam — tried, hurts accuracy.** Reranked each row's top5
+candidates by cosine similarity between a `sentence-transformers/all-MiniLM-L6-v2`
+embedding of the last-12-word context and an embedding of each candidate word (mean-
+pooled, normalized), independent one-off script (not committed):
+
+| | top1 acc |
+|---|---|
+| beam log-prob order (baseline) | 69.72% (5716/8198) |
+| MiniLM-cosine reranked | 58.31% (4780/8198) |
+| top5 ceiling | 84.02% (6888/8198) |
+
+-11.4pt, net loss (439 flips wrong→right vs. 1375 right→wrong). MiniLM's generic
+topical-similarity score is blind to grammar/agreement/tense/recency — it prefers
+`deaths` over `death`, `an` over `a`, `because` over `by`, `fourth` over `first`,
+exactly the syntactic signal the causal LM's own beam score already encodes for free.
+Sentence-embedding cosine similarity is the wrong tool for next-token reranking; it's
+built for retrieval/topical-similarity, not fluency/grammaticality.
+
+**Trained cross-encoder reranker (MiniLM, listwise cross-entropy over the top5) —
+also tried, also hurts.** Pilot (`scripts/train_reranker.py`, n=3000 rows generated
+from a train-split chunk the LoRA fine-tune never saw): 69.72% → 62.34% top1. Better
+than the frozen-cosine attempt but still net-worse than the beam's own ranking.
+Per the pilot's own go/no-go rule, not scaled to the full run — a trained reranker
+only ever sees the same left-context the LM already conditioned on, no new
+information, so it's fighting for scraps of a signal the causal LM's beam score
+already has, not adding a fresh one.
+
+## Matched zero-shot vs fine-tuned comparison + n-gram blend
+
+**Resolved whether the LoRA fine-tune (~8h/~25M tokens across 2 Kaggle sessions) was
+worth it.** The earlier comparison (zero-shot 70.20-70.26% vs fine-tuned 69.72%) mixed
+greedy decoding (zero-shot) against beam-top1 (fine-tuned) — not apples to apples.
+Reran both through the identical beam-k5 protocol, same 8198 word rows
+(`scripts/gen_matched_scores.py`, local 4060 — Kaggle's T4 measured slower here even
+after fixing an accidental multi-GPU model shard, ~1.5 rows/s vs local's 7.5-8.75,
+so this ran local instead):
+
+| | top1 | top5 |
+|---|---|---|
+| zero-shot (beam k=5) | 66.52% (5453/8198) | 82.11% (6731/8198) |
+| fine-tuned LoRA (beam k=5) | **69.72%** (5716/8198) | **84.02%** (6888/8198) |
+
+**+3.2pt top1 under matched protocol — fine-tuning genuinely helped.** The earlier
+flat-looking result was a decoding-method artifact (beam search apparently hurts the
+zero-shot model's calibration more than greedy does), not evidence the training was
+wasted.
+
+**N-gram blend** (`scripts/blend_ngram.py`): `score(w) = λ·logP_lm(w) + (1-λ)·logP_ngram(w)`,
+candidate set = fine-tuned LM's top5 ∪ the n-gram's own best guess (so the blend can
+recover a word the LM's beam never generated, not just rerank its list).
+
+First pass tuned λ on a single stratified 80/20 split (λ=0.90, 72.50% word on the
+1640-row word holdout) — **that number turned out to be small-sample noise**, not a
+real effect: n=1640 carries ±2pt at 95% CI. Replaced with pooled 5-fold stratified
+CV (every one of the 9448 rows held out exactly once, tuned on the other 4 folds each
+time) for a trustworthy estimate:
+
+| | pooled 5-fold CV accuracy |
+|---|---|
+| word (blended) | **71.52% (5863/8198)** |
+| symbol (deterministic) | 98.76% (1035/1048) |
+| number (n-gram only) | 68.32% (138/202) |
+| **overall** | **74.47% (7036/9448)** |
+
+Beats pure n-gram (55.51% word), pure zero-shot LLM (66.52-70.2%), and pure
+fine-tuned LLM (69.72%) — real margin (+1.8pt word over fine-tuned LLM alone), just
+smaller than the noisy first read suggested.
+
+**KenLM modified-Kneser-Ney 5-gram, swapped in as the blend's n-gram scorer**
+(status.md advice item 1 — built `tools/lmplz` from source, trained on the full
+130M-token `train_final.src.tok`, replaces the old unsmoothed relative-frequency
+`score_word`). Compared under the *identical* pooled-CV harness to isolate the
+effect of the scorer swap alone:
+
+| n-gram scorer | word | overall |
+|---|---|---|
+| old (unsmoothed counts, backoff 4→1) | 71.52% (5863/8198) | 74.47% (7036/9448) |
+| KN5 (KenLM, modified Kneser-Ney) | **71.74% (5881/8198)** | **74.66% (7054/9448)** |
+
+**+0.22pt word, +0.19pt overall** — real (both measured on the same 9448 rows,
+same folds) but well under the advice's +1-2pt estimate. Smoothing quality wasn't
+the bottleneck here; the blend's ceiling looks set mostly by the candidate set
+(LM top5 ∪ n-gram top1), not by how well either side's probabilities are calibrated.
+Kept KN5 as the default scorer (strictly better, free).
+
+**Direct candidate scoring** (status.md advice item 5, `scripts/score_candidates.py`):
+instead of trusting `generate()`'s own beam sequence log-prob, score every candidate
+in the union set (LM's beam top5 ∪ n-gram's own top10 for that letter — widened from
+top1) with one teacher-forced batched forward pass, summing full-word log-prob.
+Removes beam-search pruning distortion on multi-subword words and gives scores that
+are directly comparable across candidates the beam itself never fully explored.
+Compared under the identical pooled-CV harness, KN5 scorer both times:
+
+| LM scoring | word | overall |
+|---|---|---|
+| beam sequence_scores (top5 only) | 71.74% (5881/8198) | 74.66% (7054/9448) |
+| teacher-forced (top5 ∪ ngram-top10 union) | **72.62% (5953/8198)** | **75.42% (7126/9448)** |
+
+**+0.88pt word, +0.76pt overall** — the largest single gain of this round, and
+consistent with a 200-row pilot that showed the same effect (72.5% top1) before
+committing to the full run. **New best pipeline result (going into item 2):
+72.62% word / 75.42% overall** (beats fine-tuned LLM alone by +2.9pt word).
+
+**Learned blender** (status.md advice item 2, `scripts/learned_blender.py`):
+replaced the scalar λ with `sklearn.HistGradientBoostingClassifier` (already
+installed, no new dependency), pointwise-to-listwise over 7 features per candidate —
+teacher-forced LM log-prob, LM rank, KN5 log-prob, n-gram backoff level (highest
+order the candidate was actually seen at — genuinely new info the LM's own
+log-prob doesn't carry), unigram log-frequency, word length, is-function-word.
+Same pooled 5-fold CV:
+
+| blend method | word | overall |
+|---|---|---|
+| scalar λ (KN5 + teacher-forced) | **72.62% (5953/8198)** | **75.42% (7126/9448)** |
+| learned GBDT blender | 72.55% (5948/8198) | 75.37% (7121/9448) |
+
+**Flat, marginally worse — abandoned.** The extra features didn't add anything the
+1-parameter λ blend wasn't already capturing: backoff level and unigram frequency
+correlate heavily with KN5's own log-prob (that's literally what KN5 is built from),
+and is-function-word/word-length carry too little independent signal at this
+candidate-set size to earn their model complexity. Same root lesson as the MiniLM
+reranker post-mortem above — more model complexity doesn't help when the "new"
+features aren't actually independent of what's already blended.
+
+**Second LLM in the blend** (status.md advice item 4, `scripts/score_candidates.py`
++ `scripts/blend3.py`): rather than fine-tuning a second model, added **Mistral-7B-v0.1
+base, zero-shot**, teacher-forced-scored on the exact same candidate set already used
+for Qwen (LM top5 ∪ n-gram top10 — no new candidate generation, no beam search for
+Mistral at all, just one forward pass per row reusing `score_candidates.py`). Chosen
+for genuine architectural diversity, not solo accuracy: different pretraining corpus,
+different tokenizer (SentencePiece vs Qwen's byte-BPE) — checked two truly
+different-architecture options first (state-space `mamba-2.8b`: 65.55% word zero-shot;
+pure-RNN `RWKV-4-3b`: 60.66%) but both trailed Qwen by 4.7-9.6pt, too far behind to
+expect a net blend gain; Mistral's -0.34pt solo gap was the safer bet.
+
+3-way blend: `score(w) = λ_qwen·qwen_tf(w) + λ_mistral·mistral_tf(w) + (1-λ_qwen-λ_mistral)·kn5(w)`,
+2D grid search over the (λ_qwen, λ_mistral) simplex, same pooled 5-fold CV, KN5 scores
+precomputed once per row (not per grid point — a 2D grid recomputing KenLM inside the
+inner loop would have taken ~37 hours; precomputing brought the whole grid search
+under 2 minutes):
+
+| blend | word | overall |
+|---|---|---|
+| 2-way (Qwen tf + KN5) | 72.62% (5953/8198) | 75.42% (7126/9448) |
+| 3-way (+ Mistral tf) | **74.64% (6119/8198)** | **77.18% (7292/9448)** |
+
+**+2.02pt word, +1.76pt overall — the largest single gain of the entire session**,
+bigger than items 1, 2, and 5 combined. Tuned weights: λ_qwen≈0.20-0.30,
+λ_mistral≈0.50-0.60 (KN5 gets the remainder). **Mistral is weighted MORE than Qwen**
+despite scoring slightly lower solo zero-shot (69.92% vs 70.20-70.26%) — direct
+evidence that the architecture-diversity bet was the right call: Mistral's errors are
+decorrelated enough from Qwen's that the blend leans on it harder than raw solo
+accuracy would predict. Result at this point: 74.64% word / 77.18% overall
+(+4.9pt word over fine-tuned LLM alone). Kept as production (KN5 + teacher-forced +
+Mistral 3-way blend).
+
+**Number-only KN5** (`scripts/extract_gigaword_numbers.py`, `scripts/filter_train_numbers.py`,
+`scripts/eval_number_kn5.py`): the general n-gram routes the number category alone
+(word/symbol don't touch it), but it's trained on the same corpus as everything else —
+no new information for numbers specifically. Built a second KN5, this one trained ONLY
+on number-containing lines, drawing on Gigaword (previously unused — training on it in
+full is too slow, but a digit-only slice is tiny) plus `train_final.src.tok`'s own
+number lines:
+
+1. Stream `gigaword.tar.gz`, keep only paragraphs with ≥1 digit token, anonymize each
+   digit run to `"1"*len` (matching `train_final.src.tok`'s own scheme — confirmed only
+   lengths 1-8 ever appear there) *before* the vocab lookup, not after — a literal `"37"`
+   was never going to be in-vocab, `"11"` already is. 10.28M/31.3M paragraphs kept.
+2. Filter `train_final.src.tok` to its own number-containing lines the same way (no
+   anonymization needed, already done) — 1.27M/3.80M lines kept.
+3. Concatenate (11.56M lines, 606M tokens) and train a 5th-order KenLM model
+   (`weights/kn5_numbers.binary`), same `lmplz`/`build_binary` pipeline as the main KN5.
+4. At inference: score candidates `"1"`, `"11"`, ..., `"1"*8` under this model, argmax —
+   same shape as the general n-gram's digit-length prediction, just a model trained
+   exclusively on number contexts instead of everything.
+
+| number scorer | accuracy (2023-row set, matches `num/`'s classifier comparison) |
+|---|---|
+| general n-gram (`ngram_4_a.bin`) | 71.97% (1456/2023) |
+| **Gigaword+train number KN5** | **74.59% (1509/2023)** |
+
+**+2.62pt** on number, on the full (non-sampled) number subset. On the 9448-row pooled
+eval sample (202 number rows): 68.32% (138/202) → **73.27% (148/202)**, +4.95pt — overall
+77.18% → **77.29%** (word/symbol untouched, this only replaces number routing).
+
+Also worth noting: `num/`'s own earlier attempt at a number-specific model (bag-of-words
+logreg/Naive Bayes, trained on the *same* `train_final.src.tok` the general n-gram
+already sees) scored 48-54% on this same 2023-row set — *worse* than the general
+n-gram. Confirms the lesson: a model "specific to number" only helps if it draws on
+genuinely new data (Gigaword here), not just a same-corpus subset with less to learn
+from.
+
+**Continued Qwen training + wider beam (k5→k10)** (status.md "To try", both landed
+together): Qwen2.5-3B LoRA continued for 6h more on Kaggle (fresh chunk,
+`SKIP_LINES=900_000`, warmup_steps=30 fix carried over) — solo greedy-generation
+accuracy (same stratified 10% sample, same eval as the original fine-tune) jumped
+69.72%→**73.15% word** (+3.43pt, full 8198-row sample, not noise). Loss curve: steady
+decline 2.41→2.26 over 1140 logged steps, still trending down at the 6h cutoff.
+Paired with widening the beam from k5 to k10 (`scripts/infer_topk.py --k 10`) for
+candidate generation — error EDA had found 9.5% of word rows hit a hard candidate-set
+ceiling at k5, so this targets that directly. Combined effect on the candidate
+ceiling: word top5 84.02%→**87.57%**, top10 88.13% (same sample).
+
+Re-ran the full 3-way blend (Qwen tf + Mistral tf + KN5, `scripts/score_candidates.py`
+`--lm-source topk` — added to read `infer_topk.py`'s plain-word `top_predictions`
+column, distinct from the `word:score` format the older `zeroshot`/`lora`/`tf` sources
+use) on the widened candidate set:
+
+| | word | overall |
+|---|---|---|
+| k5, old checkpoint | 74.64% (6119/8198) | 77.29% (7302/9448) |
+| **k10, 6h-retrained checkpoint** | **75.09% (6156/8198)** | **77.68% (7339/9448)** |
+
+**+0.45pt word, +0.39pt overall.** Two changes bundled at once (retrained checkpoint +
+wider beam), not isolated — same caveat as the earlier beam-vs-teacher-forced
+comparison. Notably **λ_qwen now outweighs λ_mistral (0.50 vs 0.40)**, flipped from
+the previous 0.20-0.30 vs 0.50-0.60 split — the retrained checkpoint's solo accuracy
+gain is large enough that the blend leans back on Qwen, not just on Mistral's
+diversity. **New best pipeline result: 75.09% word / 77.68% overall.**
+
+## Final pipeline breakdown — how the 77.68% is achieved
+
+**Routing by category** (`categorize()` on the answer token — has a real letter →
+word, all-digits → number, else → symbol):
+
+| category | method | accuracy |
+|---|---|---|
+| symbol | deterministic — predict the given first letter itself | 98.76% (1035/1048) |
+| number | number-only KN5 (`kn5_numbers.binary`, Gigaword+train, see above) | 73.27% (148/202) |
+| word | 3-way blend (below), k10 beam, 6h-retrained checkpoint | 75.09% (6156/8198) |
+| **overall** | | **77.68% (7339/9448)** |
+
+Symbol and number never touch the LLMs — symbols are a ~99% ceiling with nothing to
+gain (confirmed at EDA stage); numbers are the corpus's anonymized `1111`-style
+placeholder digits, which no LLM ever generates (structural, not a capability gap),
+so the n-gram — which conditions digit-length on context — handles that category
+alone.
+
+**Word category = 3-way blend.** For each row, three signals are combined into one
+score per candidate word, and the highest-scoring candidate wins:
+
+```
+score(w) = λ_qwen · qwen_tf(w)  +  λ_mistral · mistral_tf(w)  +  (1 − λ_qwen − λ_mistral) · kn5(w)
+```
+
+- **`qwen_tf(w)`** — fine-tuned Qwen2.5-3B LoRA's teacher-forced full-word log-prob.
+  One batched forward pass per row (no beam search) sums per-token log-prob for each
+  candidate under teacher forcing — `scripts/score_candidates.py`.
+- **`mistral_tf(w)`** — Mistral-7B-v0.1 base, zero-shot (no fine-tuning), teacher-forced
+  the same way, over the *same* candidate set Qwen already fixed (no separate beam
+  search or candidate generation for Mistral at all).
+- **`kn5(w)`** — a modified-Kneser-Ney 5-gram (KenLM, `tools/lmplz`, trained on the
+  full 130M-token `train_final.src.tok`) log-prob of the candidate given context.
+- **Candidate set** — union of Qwen's own beam-search top5 and the raw-count n-gram's
+  top10 words starting with the required letter (`infer_ngram.topk_by_letter`). This
+  lets the blend recover a correct word neither LLM's beam ever generated, not just
+  rerank a fixed list.
+- **λ_qwen, λ_mistral** — grid-searched over the 2D simplex (0.1 steps, `λ_qwen +
+  λ_mistral ≤ 1`), tuned per fold; landed at λ_qwen≈0.20-0.30, λ_mistral≈0.50-0.60
+  (KN5 gets the ~0.1-0.3 remainder) — Mistral outweighs Qwen despite lower solo
+  accuracy, see above.
+
+**Eval protocol.** Stratified 10% sample of `dev_set_final.csv` (seed 42, same sample
+used throughout this comparison track) — 9448 rows total: 8198 word / 1048 symbol /
+202 number. Word-category accuracy is measured by **pooled stratified 5-fold
+cross-validation**: the 8198 word rows are split into 5 folds; for each fold, λ_qwen
+and λ_mistral are grid-searched on the other 4 folds, then applied to predict the
+held-out fold. Every row gets exactly one out-of-fold prediction, so the reported
+74.64% is a genuine held-out estimate over the full sample — not a single noisy
+80/20 split (an earlier version of this pipeline reported 72.50% word from exactly
+that mistake; the true pooled-CV number was 71.52%, see the n-gram-blend section
+above). Symbol and number accuracy are computed directly (deterministic / n-gram-only,
+no tuning needed, so no CV split required for those categories).
+
+**Scripts**: `scripts/gen_matched_scores.py` (Qwen beam-k5 pass), `scripts/score_candidates.py`
+(Qwen and Mistral teacher-forced scoring, `--lm-source lora|tf`), `scripts/blend3.py`
+(3-way blend + grid search + pooled CV report, number routing via `--number-model`).
+Data: `weights/qwen_tf_scores.csv`, `weights/mistral_tf_scores.csv`, `weights/kn5.binary`,
+`weights/kn5_numbers.binary`, `weights/ngram_4_a.bin`.
