@@ -31,3 +31,5 @@ unsloth_compiled_cache
 kaggle/*.json
 status.md 
 TODO.md 
+report/*
+!final_report.pdf
