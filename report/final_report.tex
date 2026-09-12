@@ -57,7 +57,7 @@ prunable, not a coverage risk.
 
 \textbf{Answer categories} (regex on the answer token): digits $\rightarrow$
 \textbf{number}, \texttt{[a-z']+} $\rightarrow$ \textbf{word}, everything else
-(punctuation, and mixed alnum such as a digit+letter token) $\rightarrow$
+(punctuation, and mixed alphanumeric such as a digit+letter token) $\rightarrow$
 \textbf{symbol}. Symbol is near-fully deterministic from the given first
 letter alone ($\sim$99.6\% majority-vote ceiling; 24 of 27 first-letters are
 fully deterministic in dev, only \code{1}, \code{e}, \code{u} are ambiguous)
@@ -68,29 +68,29 @@ generation; every number's first letter is literally \code{1}, so this route
 is triggered unambiguously. Word is the open-vocabulary main task (83,228 /
 94,488 dev rows, 88\%) and is where essentially all modeling effort went.
 
-\textbf{Gigaword} (NYT, 2.37GB compressed, 149 monthly files 1994--2006,
+\textbf{Gigaword} (NYT, 2.37GB compressed,
 $\sim$1.4B tokens after masking to train's vocab) was tried as extra general
 training data. It does not fit the task: after masking, its own vocab
 (93,279 words) is \emph{smaller} than train's (99,018) despite roughly 8x the
 lines, and a 4-gram trained on it alone underperforms training on
-\code{train\_final.src.tok} alone by 9.9pt overall / 10.3pp alnum
+\code{train\_final.src.tok} alone by 9.9pt overall / 10.3pp alphanumeric
 (\S\ref{sec:ngram}) --- off-domain text does not cover dev/test's specific
 distribution even after vocab-masking and retokenizing. Gigaword was
 ultimately kept only as an auxiliary corpus for the number category, where
 its scale outweighs the domain mismatch because the sub-task (digit-length
 only) is narrow enough for out-of-domain text to still help.
 
-\textbf{Cleaning hypothesis, tested false.} Assumption going in: stripping
+\textbf{Cleaning hypothesis, tested false.} We have assumpation going in that stripping
 punctuation before training would reduce n-gram sparsity (fewer distinct
 context "words" ending in \texttt{,}/\texttt{-}) and so improve word accuracy.
 Tested directly, one variable at a time, with punctuation stripped from both
-the training corpus \emph{and} the dev context (so this is not a
-train/eval-format mismatch): a corpus cleaned to alnum-only scores 45.19\%
-vs.\ 51.71\% raw (\textbf{-6.5pt}). Since both sides were cleaned
+the training corpus and the dev context (so this is not a
+train/eval-format mismatch): a corpus cleaned to alphanumeric-only scores 45.19\%
+vs.\ 51.71\% raw (\textbf{-6.5pp}). Since both sides were cleaned
 consistently, the drop cannot be attributed to a preprocessing mismatch ---
 it is evidence that punctuation tokens in the context carry real predictive
 structure (e.g.\ marking clause boundaries and syntactic position) that the
-n-gram uses, not just noise diluting the counts. Kept raw text for every
+n-gram uses, not just noise diluting the counts. Resulting in us using raw text for every
 n-gram from this point on.
 
 \section{Model}
@@ -98,7 +98,7 @@ n-gram from this point on.
 \subsection{N-gram}
 \label{sec:ngram}
 
-Two n-gram models recur throughout this section, on both the discarded split
+Two n-gram models with fallback to lower order recur throughout this section, on both the discarded split
 and the official data: \textbf{Model A} is trained on the task's own,
 in-domain train corpus (\code{train.src.tok} on the discarded split,
 \code{train\_final.src.tok} on the official data); \textbf{Model B} is
@@ -112,7 +112,7 @@ check, not context length. At order 4, pruned \code{(context, word)} tables
 already hit their "keep everything, it's all rare" fallback for 98.0\% of
 contexts (54.8\% at order 2, 94.1\% at order 3); order 5 would push almost
 every context into that same regime with nothing left to prune and no real
-accuracy gain, just more RAM and training time. Separately, on the discarded
+accuracy gain, just more memory usage and training time. Separately, on the discarded
 split, pushing Model A alone from order 4 through order 7 measured this
 diminishing-returns curve directly:
 
@@ -139,17 +139,17 @@ chasing order 8/9 (this did require rebuilding KenLM from the stock
 backward-compatible with existing models by smoke test before promoting).
 
 \textbf{Model A + Model B interpolation.} Linear
-interpolation in probability space, $P = \lambda \cdot 10^{\log A} +
-(1-\lambda) \cdot 10^{\log B}$, was grid-searched for $\lambda$ against
-perplexity on eval, then applied as-is to test and to the accuracy task. Best
+interpolation in probability space, $P = \lambda A +
+(1-\lambda) B$, was grid-searched for $\lambda$ against
+perplexity on eval dataset, then applied as-is to test and to the accuracy task. Best
 $\lambda=0.71$ cut perplexity by $\sim$20\% over Model A alone (92.3
 $\rightarrow$ 74.0) and carried straight over to accuracy without separate
-tuning: alnum accuracy rose from 57.61\%/57.47\% (Model A solo) to
+tuning: alphanumeric accuracy rose from 57.61\%/57.47\% (Model A solo) to
 \textbf{60.16\%/60.02\%} (eval/test) --- a further +2.5--2.6pp gain, the
 biggest lever in the n-gram stage.
 
 \textbf{Engine: Python to C++.} The first trainer was a pure-Python count
-table, which does not scale to gigaword-sized corpora. Replaced with
+table, which does not scale to gigaword-sized corpora due to memory constraint. Replaced with
 \textbf{KenLM} (C++, exact external-memory counting, modified Kneser--Ney
 smoothing) --- this became the production n-gram engine (\code{KN5}, trained
 on the full 130M-token official train corpus) for every experiment after
@@ -157,18 +157,18 @@ this point, including the LLM blends below.
 
 \textbf{KN5 as the blend's scorer.} The LLM blend's n-gram term (\S\ref{sec:llm})
 was switched from an unsmoothed relative-frequency scorer to KN5, for
-better-calibrated probabilities at no extra cost: +0.22pt word / +0.19pt
+better-calibrated probabilities at no extra cost: +0.22pp word / +0.19pp
 overall.
 
 \textbf{Dedicated number KN5.} Numbers have few in-domain training examples,
-so the general n-gram is comparatively weak there. Built a second KN5 trained
+so the general n-gram is comparatively weak there. So we built a second KN5 trained
 \emph{only} on number-containing lines: gigaword paragraphs with $\geq$1 digit
 token (anonymized to the matching \code{1}-run \emph{before} the vocab
 lookup, so a literal \code{"37"} is treated as the in-vocab \code{"11"}) plus
 train's own number-containing lines, 11.56M lines / 606M tokens combined.
 This is the one place gigaword's raw scale helps rather than hurts, since the
 sub-task is narrow enough that off-domain text about numbers still transfers.
-Result: 71.97\% $\rightarrow$ \textbf{74.59\%} number accuracy (+2.6pt),
+Result: 71.97\% $\rightarrow$ \textbf{74.59\%} number accuracy (+2.6pp),
 beating a same-corpus-subset baseline (a bag-of-words classifier trained on
 train's number rows alone scored only 48--54\%) --- a "number-specific"
 model only helps when it draws on new data, not just a smaller slice of the
@@ -179,8 +179,8 @@ same corpus.
 
 \textbf{Choosing a base model.} A shortlist of open models under 7B was
 benchmarked zero-shot directly on the task (2,000-row sample, greedy
-decoding, letter-masked); Qwen2.5-3B was chosen as base model --- much
-smaller than Mistral-7B-v0.1 yet slightly ahead of it.
+decoding, letter-masked); Qwen2.5-3B was chosen as base model because it is much
+smaller than Mistral-7B-v0.1 yet perform slightly ahead.
 
 \begin{table}[h]
 \centering
@@ -202,13 +202,12 @@ phi-2 & 59.08\% & 62.15\% \\
 \end{tabular}
 \end{table}
 
-The spread is 11pt top-to-bottom among models all under 7B parameters:
+The spread is 11pp top-to-bottom among models all under 7B parameters:
 Falcon3-3B-Base, SmolLM2-1.7B and phi-2 in particular trail the winner by
-8--11pt despite being the same size class or larger than some models that did
+8--11pp despite being the same size class or larger than some models that did
 well, so parameter count alone did not predict this task's zero-shot
-accuracy --- pretraining data/recipe mattered more. Llama-3.2-3B could not be
-tested (gated, access denied). A later check of Qwen3.5 (released after this
-shortlist) confirmed newer/bigger was not automatically better here either:
+accuracy --- pretraining data/recipe mattered more. A later check of Qwen3.5
+confirmed newer/bigger was not automatically better here either:
 Qwen3.5-4B-Base scored 66.46\% word and Qwen3.5-2B-Base 61.18\%, both below
 Qwen2.5-3B's 70.26\%, and 2.5--4x slower per row in this environment (a
 hybrid linear-attention architecture without its fast-path kernels available,
@@ -217,7 +216,7 @@ was kept as the base model throughout.
 
 \textbf{Small-model fine-tune, as a cautionary case.} A much smaller model
 (\code{Qwen2.5-0.5B}) was LoRA fine-tuned for 8h on the full train corpus,
-reaching only \textbf{39.83\% alnum} --- worse than every zero-shot model in
+reaching only \textbf{39.83\% alphanumeric} --- worse than every zero-shot model in
 Table~\ref{tab:shortlist} and worse than the plain n-gram baseline. Loss was
 still falling at the 8h cutoff: the same undertraining failure mode as
 elsewhere in this project, pointing to more training rather than a broken
@@ -227,7 +226,7 @@ setup.
 GPT-2-medium-widened model (497M params, word-level vocab built directly from
 train, no subword/BPE, never pretrained) was trained from random
 initialization on the full corpus across multiple 8h Kaggle sessions to a
-flat loss plateau. It reached \textbf{68.09\% alnum} (71.45\% overall,
+flat loss plateau. It reached \textbf{68.09\% alphanumeric} (71.45\% overall,
 test split) --- better than the undertrained small LoRA fine-tune above, and
 close to the zero-shot pretrained 3B models, but plateaued there:
 more steps did not move it further. Conclusion: 497M is roughly the ceiling
@@ -239,7 +238,7 @@ r=16/$\alpha$=32, on q/k/v/o\_proj, plain packed-sequence causal-LM
 objective) was fine-tuned on the full train corpus. Under matched greedy
 decoding, the zero-shot base model scores 70.20\% word
 (Table~\ref{tab:shortlist}); the fine-tuned checkpoint reaches
-\textbf{73.15\%} (+2.95pt) --- fine-tuning measurably helps beyond the
+\textbf{73.15\%} (+2.95pp) --- fine-tuning measurably helps beyond the
 pretrained zero-shot baseline.
 
 \textbf{Error analysis on the fine-tuned model.} On a beam-k5 evaluation of
@@ -269,10 +268,10 @@ union set (LM top5 $\cup$ n-gram top10 for that letter) was scored with one
 batched teacher-forced forward pass, summing full-word log-probability. This
 removes beam-search pruning distortion on multi-subword words and lets scores
 be compared directly across candidates the beam itself never fully explored:
-71.74\% $\to$ \textbf{72.62\%} word (+0.88pt), 74.66\% $\to$ \textbf{75.42\%}
-overall (+0.76pt) --- the largest gain among the candidate-scoring changes.
+71.74\% $\to$ \textbf{72.62\%} word (+0.88pp), 74.66\% $\to$ \textbf{75.42\%}
+overall (+0.76pp) --- the largest gain among the candidate-scoring changes.
 
-\textbf{2-way blend.} Combining the fine-tuned Qwen with KN5,
+\textbf{2-way blend.} Combining the fine-tuned Qwen2.5-3B with KN5,
 teacher-forced scoring on both sides:
 \begin{equation}
 \text{score}(w) = \lambda \cdot \text{qwen}_{tf}(w) + (1-\lambda) \cdot \text{kn5}(w)
@@ -280,10 +279,10 @@ teacher-forced scoring on both sides:
 \end{equation}
 reached \textbf{72.62\%} word / \textbf{75.42\%} overall (pooled 5-fold CV,
 every row held out exactly once) --- beating fine-tuned Qwen alone by
-+2.9pt word, and beating a single noisy 80/20 split's earlier 72.50\%
++2.9pp word, and beating a single noisy 80/20 split's earlier 72.50\%
 estimate, which the pooled-CV re-run showed was itself optimistic
 (true pooled number for the pre-KN5 scorer was 71.52\%, not 72.50\%; n=1640
-alone carries $\pm$2pt at 95\% CI, which is why the wider CV was run at all).
+alone carries $\pm$2pp at 95\% CI, which is why the wider CV was run at all).
 
 \textbf{3-way blend, adding Mistral.} Rather than fine-tuning a second model,
 \textbf{Mistral-7B-v0.1 base, zero-shot}, was teacher-forced-scored on the
@@ -299,11 +298,11 @@ candidate generation for Mistral at all):
 Mistral was chosen for architectural diversity, not solo accuracy: two other
 different architectures were checked first, state-space \code{mamba-2.8b}
 (65.55\% word zero-shot) and pure-RNN \code{RWKV-4-3b} (60.66\%), but both
-trailed Qwen by 4.7--9.6pt, too far behind to expect a net blend gain;
-Mistral was chosen instead, only -0.34pt behind Qwen solo. The 3-way blend
+trailed Qwen by 4.7--9.6pp, too far behind to expect a net blend gain;
+Mistral was chosen instead, only -0.34pp behind Qwen solo. The 3-way blend
 gave the largest gain among the blending experiments: 74.64\% $\rightarrow$
 \textbf{75.09\%} word, 77.18\% $\rightarrow$ \textbf{77.68\%} overall (after
-a later continued fine-tune and wider beam, below), a +2.0pt word jump from
+a later continued fine-tune and wider beam, below), a +2.0pp word jump from
 adding Mistral alone: its errors are decorrelated enough from Qwen's that
 the blend weights it more than raw solo accuracy would predict.
 
@@ -320,8 +319,7 @@ word, 77.29\% $\to$ \textbf{77.68\%} overall.
 
 The comparison-track numbers above are all measured on a fixed 10\% dev
 sample (9,448 rows) for fast iteration. The actual submission pipeline was
-run at full scale, which required real engineering to fit the compute
-budget:
+run at full scale. Due to compute constraint we need to split the inference between Kaggle and local session
 \begin{itemize}
 \item Dev was stratified-subsampled 94,488 $\to$ 20,000 rows (seed 123,
 proportional per answer category) to bound Kaggle time; test was run in full
@@ -387,7 +385,7 @@ Qwen scoring across the local RTX 4060 and a single Kaggle T4, while Mistral
 pure Python to the C++ KenLM implementation to handle gigaword-scale data.
 
 \textbf{What we'd do better.} The zero-shot spread in
-Table~\ref{tab:shortlist} (11pt between Qwen2.5-3B and phi-2, all under 7B)
+Table~\ref{tab:shortlist} (11pp between Qwen2.5-3B and phi-2, all under 7B)
 tracks pretraining scale/recipe more than any pipeline choice tested here,
 so a larger base model is the most direct untested lever toward 80\% overall.
 Separately, the top1-error breakdown (\S\ref{sec:llm}) attributes most of
@@ -405,12 +403,12 @@ candidate set.
 method & word / metric & overall \\
 \midrule
 n-gram, order-5, cleaned corpus (hyp.\ test) & 45.19\% & --- \\
-n-gram, order-5, raw corpus & 57.61\% alnum & --- \\
-n-gram, Model A+B interpolated ($\lambda$=0.71) & 60.16\% alnum & --- \\
+n-gram, order-5, raw corpus & 57.61\% alphanumeric & --- \\
+n-gram, Model A+B interpolated ($\lambda$=0.71) & 60.16\% alphanumeric & --- \\
 n-gram, order-4, official data (Model A) & 55.51\% & 60.12\% \\
 n-gram, order-4, gigaword only (Model B, official) & 45.17\% & 50.23\% \\
-GPT-2 (497M), trained from scratch & 68.09\% alnum & 71.45\% \\
-Qwen2.5-0.5B, LoRA fine-tuned, undertrained & 39.83\% alnum & --- \\
+GPT-2 (497M), trained from scratch & 68.09\% alphanumeric & 71.45\% \\
+Qwen2.5-0.5B, LoRA fine-tuned, undertrained & 39.83\% alphanumeric & --- \\
 small pretrained LLM shortlist, zero-shot & 59--70\% (Table~\ref{tab:shortlist}) & 62--72\% \\
 Qwen2.5-3B, zero-shot (matched beam k=5) & 66.52\% & --- \\
 Qwen2.5-3B, fine-tuned (LoRA r=16/$\alpha$=32) & 73.15\% & --- \\
