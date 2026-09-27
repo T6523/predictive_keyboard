@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Predictive Keyboard</title>
+<meta name="description" content="A real n-gram model predicting your next word, running entirely in your browser.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <section class="hero">
+    <div class="hero-inner">
+      <h1 class="title">Predictive Keyboard</h1>
+      <p class="hint" id="hint">Loading model…</p>
+      <textarea id="typer" class="typer" autocomplete="off" autocorrect="off"
+                autocapitalize="off" spellcheck="false" rows="6" disabled
+                placeholder="start typing…"></textarea>
+      <div class="suggestion-bar" id="suggestions">
+        <button class="chip" disabled></button>
+        <button class="chip" disabled></button>
+        <button class="chip" disabled></button>
+      </div>
+      <p class="footer">
+        n-gram model, ~10MB, backoff over 1-4 word context, runs 100% client-side, no server &middot;
+        <a href="https://github.com/T6523/predictive_keyboard" target="_blank" rel="noopener">source</a>
+      </p>
+    </div>
+    <a class="peek" href="#info" aria-label="Scroll for full architecture and results">
+      Full architecture &amp; results <span class="peek-arrow">&darr;</span>
+    </a>
+  </section>
+
+  <section class="info" id="info">
+    <article class="readme">
+      <p>
+        Given a left context and the first letter of the next word, predict the word.
+        Contest project: n-gram + LLM blending for next-word prediction.
+      </p>
+      <p>
+        Full writeup (data, methods, results, negative results):
+        <a href="https://github.com/T6523/predictive_keyboard/blob/main/report/final_report.pdf" target="_blank" rel="noopener"><code>report/final_report.pdf</code></a>
+        (source: <code>report/final_report.tex</code>). Working notes from each phase:
+        <code>report/report.md</code> (official split) and <code>report/old_report.md</code>
+        (an earlier, discarded data split, kept for methodologically-still-valid findings like
+        the corpus-cleaning test).
+      </p>
+      <p class="result">
+        Final held-out result: <strong>78.60% overall / 76.09% word accuracy</strong> (&plusmn;0.8pt, 95% CI).
+      </p>
+
+      <h2>Final architecture</h2>
+      <p>Every row is routed by its answer's category, decided from the given first letter:</p>
+
+      <pre class="mermaid">
+flowchart TD
+    A["context + first letter"] --> B["route by answer category"]
+    B --> S["symbol\nmajority vote"]
+    B --> N["number\n5-gram KN (KN5)"]
+    B --> W["word"]
+
+    S --> PS["predicted symbol"]
+    N --> PN["predicted number"]
+
+    W --> Q["Qwen2.5-3B (3B)\nLoRA fine-tuned\n&lambda;_q = .40"]
+    W --> M["Mistral-7B (7B)\nzero-shot\n&lambda;_m = .50"]
+    W --> K["5-gram KN (KN5)\n&lambda;_kn5 = .10"]
+
+    Q --> SUM((&Sigma;))
+    M --> SUM
+    K --> SUM
+    SUM --> PW["predicted word"]
+
+    T["training-time only:\ngrid-search &lambda;'s on\nheld-out dev half"] -.-> SUM
+      </pre>
+
+      <ul>
+        <li><strong>symbol</strong> (~10% of rows): near-fully deterministic from the first
+          letter alone (~99.6% majority-vote ceiling) — no model needed.</li>
+        <li><strong>number</strong> (~2%): true values are anonymized to digit-length
+          placeholders, so this is a digit-length classification problem, not text generation.
+          Handled by a KN5 n-gram trained only on number-containing lines (train + Gigaword,
+          vocab-masked).</li>
+        <li><strong>word</strong> (~88%, the main task): candidates from Qwen2.5-3B (LoRA
+          fine-tuned) and Mistral-7B-v0.1 (zero-shot) are teacher-forced-scored on a shared
+          candidate set (beam top-k &cup; n-gram top-10), blended with a general-purpose KN5
+          5-gram. Blend weights are grid-searched once on a held-out dev half, then fixed for
+          inference.</li>
+      </ul>
+
+      <p>
+        See <code>report/final_report.pdf</code> &sect;II&ndash;III for the full model
+        comparisons (n-gram order ablations, zero-shot model shortlist, rerankers tried and
+        rejected, blend ablations) and the complete results table.
+      </p>
+
+      <h2>Repo layout</h2>
+      <ul>
+        <li><code>report/</code> — the report (<code>.tex</code> + <code>.pdf</code>) and the
+          two working-notes documents it's sourced from.</li>
+        <li><code>scripts/</code> — n-gram training/inference, candidate generation,
+          teacher-forced scoring, blending, reranker experiments.</li>
+        <li><code>tools/</code> — KenLM binaries (<code>lmplz</code>, <code>build_binary</code>,
+          <code>query</code>).</li>
+        <li><code>num/</code> — number-category baselines (naive Bayes / logistic regression
+          comparisons).</li>
+        <li><code>eda/</code> — exploratory data analysis notebooks.</li>
+        <li><code>kaggle/</code> — notebooks used for the Kaggle-side inference runs (Mistral
+          scoring, full-pipeline inference).</li>
+        <li><code>data/</code>, <code>weights/</code> — corpora and trained model artifacts
+          (gitignored, not tracked).</li>
+      </ul>
+
+      <p class="repo-link">
+        <a href="https://github.com/T6523/predictive_keyboard" target="_blank" rel="noopener">View the full repo on GitHub &rarr;</a>
+      </p>
+    </article>
+  </section>
+
+  <script src="app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" defer></script>
+  <script defer>
+    window.addEventListener("load", () => {
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
+      });
+    });
+  </script>
+</body>
+</html>

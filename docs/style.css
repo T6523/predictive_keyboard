@@ -1,0 +1,248 @@
+:root {
+  --bg: #eef0f3;
+  --card-bg: #fbfbfd;
+  --text: #1c1c1e;
+  --muted: #6e6e73;
+  --input-bg: #ffffff;
+  --input-border: #d8d8dc;
+  --bar-bg: #d7dae0;
+  --chip-text: #1c1c1e;
+  --divider: rgba(0, 0, 0, 0.12);
+  --accent: #0a84ff;
+  --code-bg: rgba(0, 0, 0, 0.05);
+  --peek-bg: #e2e5ea;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0b0d;
+    --card-bg: #1c1c1e;
+    --text: #f2f2f7;
+    --muted: #98989d;
+    --input-bg: #2c2c2e;
+    --input-border: #3a3a3c;
+    --bar-bg: #2c2c2e;
+    --chip-text: #f2f2f7;
+    --divider: rgba(255, 255, 255, 0.14);
+    --accent: #409cff;
+    --code-bg: rgba(255, 255, 255, 0.08);
+    --peek-bg: #202023;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* --- Hero: the typing demo, fills (almost) the first screen --- */
+
+.hero {
+  position: relative;
+  min-height: calc(100svh - 56px);
+  min-height: calc(100vh - 56px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px 72px;
+}
+
+.hero-inner {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.title {
+  margin: 0;
+  text-align: center;
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.hint {
+  margin: 0 2px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+  min-height: 20px;
+}
+
+.typer {
+  width: 100%;
+  min-height: 220px;
+  font-size: 20px;
+  line-height: 1.5;
+  font-family: inherit;
+  padding: 20px 22px;
+  border-radius: 18px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--text);
+  outline: none;
+  resize: vertical;
+}
+
+.typer:focus {
+  border-color: var(--accent);
+}
+
+.suggestion-bar {
+  display: flex;
+  background: var(--bar-bg);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.chip {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--chip-text);
+  font-size: 17px;
+  padding: 16px 8px;
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip:not(:last-child) {
+  border-right: 1px solid var(--divider);
+}
+
+.chip:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.chip:not(:disabled):active {
+  background: rgba(10, 132, 255, 0.12);
+}
+
+.footer {
+  margin: 4px 0 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.footer a {
+  color: var(--accent);
+}
+
+/* --- Peek bar: sits at the bottom of the hero viewport, hints there's more below --- */
+
+.peek {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--peek-bg);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.peek:hover {
+  color: var(--accent);
+}
+
+.peek-arrow {
+  display: inline-block;
+  animation: bob 1.6s ease-in-out infinite;
+}
+
+@keyframes bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(3px); }
+}
+
+/* --- Info section: the original README content, reached by scrolling past the peek --- */
+
+.info {
+  background: var(--card-bg);
+  padding: 48px 16px 64px;
+}
+
+.readme {
+  max-width: 720px;
+  margin: 0 auto;
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.readme h2 {
+  margin-top: 40px;
+  font-size: 22px;
+}
+
+.readme .result {
+  font-size: 17px;
+}
+
+.readme code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--code-bg);
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+.readme ul {
+  padding-left: 22px;
+}
+
+.readme li {
+  margin-bottom: 8px;
+}
+
+.readme a {
+  color: var(--accent);
+}
+
+.readme .repo-link {
+  margin-top: 32px;
+  font-weight: 600;
+}
+
+pre.mermaid {
+  background: transparent;
+  overflow-x: auto;
+  display: flex;
+  justify-content: center;
+  margin: 24px 0;
+}
+
+@media (max-width: 480px) {
+  .title {
+    font-size: 26px;
+  }
+  .typer {
+    min-height: 160px;
+    font-size: 17px;
+    padding: 16px 16px;
+  }
+  .hero {
+    padding-top: 24px;
+  }
+}
