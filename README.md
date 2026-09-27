@@ -10,6 +10,14 @@ methodologically-still-valid findings like the corpus-cleaning test).
 
 Final held-out result: **78.60% overall / 76.09% word accuracy** (±0.8pt, 95% CI).
 
+## Live demo
+
+**[T6523.github.io/predictive_keyboard](https://T6523.github.io/predictive_keyboard/)** —
+type in the box and get real suggestions from the n-gram, running entirely client-side
+(~10MB, no server). This is the n-gram-only slice of the pipeline (top-3 word, first-letter
+queries) — not the full LLM-blended model below, which needs a GPU and can't run in a
+browser. 70% top-3 dev accuracy on its own (65.6% word / 99.2% symbol / 95.4% number).
+
 ## Final architecture
 
 Every row is routed by its answer's category, decided from the given first letter:
@@ -62,3 +70,5 @@ and the complete results table.
 - `kaggle/` — notebooks used for the Kaggle-side inference runs (Mistral scoring,
   full-pipeline inference).
 - `data/`, `weights/` — corpora and trained model artifacts (gitignored, not tracked).
+- `docs/` — the live GitHub Pages demo (static HTML/JS/CSS + the exported n-gram trie/vocab
+  assets `scripts/build_release_assets.py` produces).
