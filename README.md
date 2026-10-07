@@ -1,10 +1,7 @@
 # Predictive Keyboard
 
-Given a left context and the first letter of the next word, predict the word. A LoRA
-fine-tuned Qwen2.5-3B is blended with a zero-shot Mistral-7B and a KenLM 5-gram
-(scalar-λ, grid-searched on pooled 5-fold CV) for the main word task, with a second
-KenLM trained on external Gigaword data just for the number category, and a separate
-trie-compressed n-gram running entirely in the browser for the live demo.
+Predict the next word from context + its first letter: 78.6% accuracy (vs. 60.1%
+n-gram baseline), using a blend of a LoRA-tuned Qwen2.5-3B, Mistral-7B, and KenLM.
 
 **[Live demo](https://t6523.github.io/predictive_keyboard/)** · PyTorch · Unsloth/PEFT
 LoRA · KenLM · n-gram (from scratch) · vanilla JS (client-side inference)
@@ -34,18 +31,20 @@ LoRA · KenLM · n-gram (from scratch) · vanilla JS (client-side inference)
 
 ## Results
 
-Dev-set numbers below are pooled 5-fold stratified CV on 9,448 rows (every row held
-out exactly once), unless noted. The final 78.60%/76.09% is the true held-out test set.
+Dev-set numbers below are pooled 5-fold stratified CV on a fixed stratified 10% sample
+of the 94,488-row dev set (9,448 rows, seed 42 — every row in that sample held out
+exactly once; used instead of the full dev set because each fold reruns LLM inference),
+unless noted. The final 78.60%/76.09% is the true held-out test set.
 
-| stage | word | overall |
-|---|---|---|
-| n-gram only (baseline) | 55.51% | 60.12% |
-| fine-tuned Qwen2.5-3B alone (beam k=5) | 69.72% | — |
-| 2-way blend: Qwen (teacher-forced) + KN5 | 72.62% | 75.42% |
-| 3-way blend: + Mistral-7B zero-shot | 74.64% | 77.18% |
-| + continued fine-tune, widened candidates (k=10 beam) | 75.09% | 77.68% |
-| + number-specific KN5 (external Gigaword data) | — | 77.29% |
-| **final, held-out test set** | **76.09%** | **78.60%** |
+| stage                                                 | word             | overall          |
+| ----------------------------------------------------- | ---------------- | ---------------- |
+| n-gram only (baseline)                                | 55.51%           | 60.12%           |
+| fine-tuned Qwen2.5-3B alone (beam k=5)                | 69.72%           | —               |
+| 2-way blend: Qwen (teacher-forced) + KN5              | 72.62%           | 75.42%           |
+| 3-way blend: + Mistral-7B zero-shot                   | 74.64%           | 77.18%           |
+| + continued fine-tune, widened candidates (k=10 beam) | 75.09%           | 77.68%           |
+| + number-specific KN5 (external Gigaword data)        | —               | 77.29%           |
+| **final, held-out test set**                    | **76.09%** | **78.60%** |
 
 Full model-comparison tables (zero-shot shortlist, reranker/blender rejections, ablations)
 are in `report/final_report.pdf` §II–III and `report/report.md`.
@@ -111,7 +110,8 @@ plausible ideas actually helped, with a real measurement each time:
   mismatched comparison had hidden.
 - **Small-sample noise caught the same way**: a first λ-tuning pass on a single 80/20
   split found λ=0.90 at 72.50% word — looked great, turned out to be noise (±2pt at
-  n=1640). Pooled 5-fold CV over all 9,448 rows replaced it with a trustworthy number.
+  n=1640). Pooled 5-fold CV over the full 9,448-row sample replaced it with a
+  trustworthy number.
 - **Rejected: MiniLM cosine rerank** of the beam's top5 — **-11.4pt** word accuracy.
   Topical-similarity embeddings are blind to grammar/agreement/tense, exactly the
   signal the causal LM's own beam score already encodes.
@@ -196,8 +196,7 @@ data files needed, e.g. `python3 export_demo_model.py --demo`.
 
 - **Data**: 3,803,957-line / 126.6M-token training corpus, 99,018-word vocab;
   94,488-row dev set, 94,826-row held-out test set.
-- **LoRA config**: rank 16, α 32, dropout 0.05, target modules `q_proj/k_proj/v_proj/
-  o_proj`, max sequence length 512, packed sequences, batch size 8 × grad-accum 4.
+- **LoRA config**: rank 16, α 32, dropout 0.05, target modules `q_proj/k_proj/v_proj/ o_proj`, max sequence length 512, packed sequences, batch size 8 × grad-accum 4.
 - **Hardware/time**: Kaggle T4 (16GB), Unsloth, ~8h wall-clock across 2 training
   sessions (continuation run resumes the previous session's adapter with a bumped
   random seed, since a from-scratch restart would silently replay the identical
@@ -206,8 +205,7 @@ data files needed, e.g. `python3 export_demo_model.py --demo`.
   containing only, anonymized to match the main corpus's scheme) + 1.27M/3.80M of the
   main train set's own number lines = 11.56M lines / 606M tokens, trained as a 5th-order
   KenLM.
-- **Browser demo config**: top-3 candidates, first-letter-only queries, `--min-count
-  10 --strict` (contexts without a genuinely common answer are dropped, not
+- **Browser demo config**: top-3 candidates, first-letter-only queries, `--min-count 10 --strict` (contexts without a genuinely common answer are dropped, not
   approximated) — a trie encoding beat a flat sorted array on every n-gram order once
   context depth exceeded 1 token, both on raw size and gzip ratio.
 
